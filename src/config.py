@@ -202,6 +202,9 @@ class Config:
             self.discovery.github_recent.token = gh
         if env.get("LLM_API_KEY"):
             self.llm.api_key = env["LLM_API_KEY"]
+            self.llm.enabled = True
+        if env.get("LLM_ENABLED"):
+            self.llm.enabled = env["LLM_ENABLED"].lower() in ("1", "true", "yes")
         if env.get("LLM_BASE_URL"):
             self.llm.base_url = env["LLM_BASE_URL"]
         if env.get("LLM_MODEL"):

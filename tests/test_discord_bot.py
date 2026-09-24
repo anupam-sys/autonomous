@@ -111,14 +111,17 @@ def test_qa_offline_response(cfg, db):
     )
     db.insert_finding(f)
     ctx = DummyContext(cfg, db)
+    ctx.disable_auto_reload = True
 
-    # With LLM disabled, returns structured offline analysis
+    # With LLM disabled and no key, returns structured offline analysis
     cfg.llm.enabled = False
-    ans = answer_finding_question(ctx, f.id, "How can I rotate this?")
+    cfg.llm.api_key = ""
+    with patch.dict(os.environ, {"LLM_API_KEY": ""}):
+        ans = answer_finding_question(ctx, f.id, "How can I rotate this?")
     assert "Finding #" in ans
     assert "openai" in ans.lower()
     assert "sk-proj-testkey12345678" in ans
-    assert "Remediation Steps" in ans
+    assert "Remediation" in ans
 
 
 def test_qa_llm_response(cfg, db):
@@ -158,6 +161,24 @@ def test_qa_llm_response(cfg, db):
 
         ans = answer_finding_question(ctx, f.id, "What does this key do?")
         assert "Stripe live secret key" in ans
+
+
+def test_qa_general_question(cfg, db):
+    ctx = DummyContext(cfg, db)
+    cfg.llm.enabled = True
+    cfg.llm.api_key = "dummy-key"
+
+    with patch("openai.OpenAI") as mock_openai:
+        mock_client = MagicMock()
+        mock_openai.return_value = mock_client
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock()]
+        mock_resp.choices[0].message.content = "To rotate an AWS key, create a new access key, update clients, then deactivate the old one."
+        mock_client.chat.completions.create.return_value = mock_resp
+
+        from src.bot.qa import ask_security_assistant
+        ans = ask_security_assistant(ctx, "How do I rotate an AWS key?")
+        assert "rotate an AWS key" in ans
 
 
 @pytest.mark.anyio

@@ -226,16 +226,45 @@ class FasDiscordBot(commands.Bot):
             if ref_id in self._message_findings:
                 finding_id = self._message_findings[ref_id]
 
-        # If inside a finding thread and not starting with a command prefix, answer the question!
-        if finding_id and not message.content.startswith("!"):
+        # Check if the bot was mentioned or sent a direct message
+        is_mention = bool(self.user and self.user.mentioned_in(message))
+        is_dm = isinstance(message.channel, discord.DMChannel)
+
+        # If inside a finding thread, or directly mentioned, or in DM (and not a ! command):
+        if (finding_id or is_mention or is_dm) and not message.content.startswith("!"):
             if not self.is_authorized(message.author.id):
                 await message.reply("⛔ You are not authorized to query this pipeline.")
                 return
 
+            clean_text = message.content
+            if self.user:
+                clean_text = clean_text.replace(f"<@{self.user.id}>", "").replace(f"<@!{self.user.id}>", "").strip()
+
+            if not clean_text:
+                await message.reply("👋 I am the FAS Security Assistant. Ask me anything about a finding, credential rotation, or scanning!")
+                return
+
+            # Retrieve prior conversation messages in thread if available
+            history_list = []
+            if hasattr(message.channel, "history"):
+                try:
+                    async for prev_msg in message.channel.history(limit=7, before=message):
+                        if prev_msg.content:
+                            role = "assistant" if prev_msg.author.id == self.user.id else "user"
+                            clean_prev = prev_msg.content
+                            if self.user:
+                                clean_prev = clean_prev.replace(f"<@{self.user.id}>", "").replace(f"<@!{self.user.id}>", "").strip()
+                            if clean_prev and not clean_prev.startswith("!"):
+                                history_list.append({"role": role, "content": clean_prev})
+                    history_list.reverse()
+                except Exception as h_exc:
+                    logger.debug("Failed to retrieve thread history: %s", h_exc)
+
             async with message.channel.typing():
                 loop = asyncio.get_running_loop()
+                from .qa import ask_security_assistant
                 response = await loop.run_in_executor(
-                    None, answer_finding_question, self.ctx, finding_id, message.content
+                    None, ask_security_assistant, self.ctx, clean_text, finding_id, history_list
                 )
 
             # Send response, splitting if it exceeds Discord's 2000-char limit

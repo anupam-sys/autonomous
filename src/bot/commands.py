@@ -88,21 +88,39 @@ def register_commands(bot: commands.Bot) -> None:
         if not fid and interaction.channel_id in bot._thread_findings:
             fid = bot._thread_findings[interaction.channel_id]
 
-        if not fid:
-            await interaction.response.send_message(
-                "❌ Please specify a `finding_id` or run `/ask` inside a finding thread.", ephemeral=True
-            )
-            return
-
         await interaction.response.defer()
+        from .qa import ask_security_assistant
         loop = asyncio.get_running_loop()
-        ans = await loop.run_in_executor(None, answer_finding_question, ctx, fid, question)
+        ans = await loop.run_in_executor(None, ask_security_assistant, ctx, question, fid)
 
         from .client import _split_message
         chunks = _split_message(ans)
         await interaction.followup.send(chunks[0])
         for chunk in chunks[1:]:
             await interaction.channel.send(chunk)
+
+    @bot.command(name="ask")
+    async def cmd_ask(c, *args):
+        if not bot.is_authorized(c.author.id):
+            return
+        if not args:
+            await c.send("❓ Please provide a question. Example: `!ask What permissions does this key have?`")
+            return
+
+        fid = None
+        question_parts = list(args)
+        if question_parts[0].isdigit():
+            fid = int(question_parts.pop(0))
+        elif c.channel.id in bot._thread_findings:
+            fid = bot._thread_findings[c.channel.id]
+
+        question = " ".join(question_parts)
+        from .qa import ask_security_assistant
+        loop = asyncio.get_running_loop()
+        ans = await loop.run_in_executor(None, ask_security_assistant, ctx, question, fid)
+        from .client import _split_message
+        for chunk in _split_message(ans):
+            await c.send(chunk)
 
     # ------------------ /scan_apk ------------------
     @bot.tree.command(name="scan_apk", description="Scan an Android APK for exposed secrets and tokens")

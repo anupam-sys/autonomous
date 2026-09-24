@@ -1,102 +1,141 @@
-"""Q&A engine for discussing findings with LLM or static context."""
+"""Q&A engine for interactive conversational LLM analysis."""
 from __future__ import annotations
 
 import os
+from typing import Any
 from ..log import get_logger
 
 logger = get_logger("bot.qa")
 
-SYSTEM_PROMPT = """You are an elite Application Security and DevSecOps analyst embedded in an autonomous secret-exposure research pipeline.
-You assist security operators by analyzing exposed credentials, tokens, and cryptographic secrets discovered in open-source repos and mobile APKs.
+SYSTEM_PROMPT = """You are the FAS Autonomous Security Assistant, chatting directly with a security researcher in Discord.
+You assist the operator with analyzing exposed credentials, API keys, tokens, and vulnerabilities discovered across codebases and Android APKs.
 
-When an operator asks a question, provide concise, highly practical technical guidance:
-1. Explain what service or API the credential accesses and what permissions or resources might be compromised.
-2. Analyze the file path, variable name, and code context to evaluate if it is a live credential, test fixture, or dummy mock.
-3. Suggest safe, non-intrusive verification methods (e.g. checking auth endpoints without modifying data) if relevant.
-4. Detail specific remediation steps (rotation, revocation, secret manager usage, git history scrubbing).
-
-Keep responses direct, authoritative, and formatted cleanly in Markdown.
+Guidelines:
+- Directly, concisely, and conversationally answer whatever question the operator asks.
+- Do NOT generate a rigid, canned 4-point template or predetermined audit report unless the operator specifically asks for a full formal report.
+- If the operator asks a direct question (e.g., "is this live?", "what API is this?", "can you explain how to rotate it?"), answer that question directly.
+- Use technical, precise DevSecOps language.
+- Format responses cleanly with GitHub-flavored Markdown.
 """
 
 
-def answer_finding_question(ctx, finding_id: int, user_question: str) -> str:
-    """Answer an operator's question about a specific finding.
+def _reload_config_if_possible(ctx: Any) -> None:
+    """Reload config overlay if configured so dashboard edits take effect immediately."""
+    if getattr(ctx, "disable_auto_reload", False):
+        return
+    try:
+        base_path = getattr(ctx.cfg, "_base_path", None)
+        overlay_path = getattr(ctx.cfg, "_overlay_path", None)
+        if base_path and os.path.exists(base_path):
+            from ..config import Config
+            fresh = Config.load(base_path, overlay_path or "none.yaml")
+            ctx.cfg = fresh
+    except Exception as exc:
+        logger.debug("Config reload in qa helper failed: %s", exc)
 
-    Uses the configured LLM endpoint (OpenAI / local / Ollama) if available,
-    or falls back to structured offline technical analysis.
+
+def ask_security_assistant(
+    ctx: Any,
+    user_question: str,
+    finding_id: int | None = None,
+    conversation_history: list[dict] | None = None,
+) -> str:
+    """Query the LLM about a specific finding or general security question.
+
+    Maintains conversational thread history when available.
     """
-    row = ctx.db.get_finding(finding_id)
-    if not row:
-        return f"❌ **Finding #{finding_id} not found in database.**"
+    _reload_config_if_possible(ctx)
 
-    row_dict = dict(row)
-    secret_val = ctx.db.get_finding_secret(finding_id) or row_dict.get("secret_preview", "unknown")
-    target_name = row_dict.get("target_name", "unknown")
-    target_kind = row_dict.get("target_kind", "unknown")
-    target_locator = row_dict.get("target_locator", "")
-    file_path = row_dict.get("file_path", "unknown")
-    line = row_dict.get("line", "?")
-    detector = row_dict.get("detector", "unknown")
-    service = row_dict.get("service", "unknown")
-    severity = row_dict.get("severity", "info")
-    confidence = row_dict.get("confidence", 0.0)
-    context_code = row_dict.get("context", "")
-    triage_status = row_dict.get("triage_status", "pending")
-    triage_notes = row_dict.get("triage_notes", "")
-
-    # Check if LLM is enabled and configured
     api_key = ctx.cfg.llm.api_key or os.environ.get("LLM_API_KEY", "")
-    has_llm = bool(ctx.cfg.llm.enabled and api_key)
+    base_url = ctx.cfg.llm.base_url or os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1")
+    is_custom_endpoint = bool(base_url and "api.openai.com" not in base_url)
 
-    if has_llm:
-        try:
-            from openai import OpenAI
+    if not ctx.cfg.llm.enabled and not api_key:
+        has_llm = False
+    else:
+        has_llm = bool(api_key or (ctx.cfg.llm.enabled and is_custom_endpoint))
 
-            client = OpenAI(
-                base_url=ctx.cfg.llm.base_url,
-                api_key=api_key or "unused",
-                timeout=ctx.cfg.llm.timeout_seconds,
-                max_retries=2,
-            )
+    if not has_llm:
+        if finding_id and hasattr(ctx, "db"):
+            row = ctx.db.get_finding(finding_id)
+            if row:
+                secret_val = ctx.db.get_finding_secret(finding_id) or row["secret_preview"]
+                return _build_offline_notice(dict(row), str(secret_val), finding_id)
 
-            prompt = f"""Finding Context:
-• ID: #{finding_id}
-• Target: {target_name} ({target_kind}) — {target_locator}
-• Location: {file_path}:{line}
-• Detector: {detector}
-• Service: {service}
-• Severity: {severity.upper()} (Confidence: {confidence:.2f})
-• Triage: {triage_status} {f'({triage_notes})' if triage_notes else ''}
-• Secret (decrypted): {secret_val}
+        return (
+            "🤖 **LLM Assistant is not configured.**\n\n"
+            "To chat with the model and ask custom questions:\n"
+            "1. Open the Web Dashboard (**Config** tab) and locate **NEURAL NETWORK — TRIAGE & AI DISCOVERY**.\n"
+            "2. Enter your **AUTHENTICATION KEY** (or export `LLM_API_KEY` in `.env`).\n"
+            "3. Check **ENABLE LLM TRIAGE** (or enter a custom local endpoint like `http://host.docker.internal:11434/v1` for Ollama).\n"
+            "4. Click **Save Configuration**."
+        )
 
-Code context:
+    # Build prompt context
+    system_content = SYSTEM_PROMPT
+    if finding_id and hasattr(ctx, "db"):
+        row = ctx.db.get_finding(finding_id)
+        if row:
+            r = dict(row)
+            secret_val = ctx.db.get_finding_secret(finding_id) or r.get("secret_preview", "unknown")
+            system_content += f"""
+
+Finding #{finding_id} Details:
+• Target: {r.get('target_name', 'unknown')} ({r.get('target_kind', 'unknown')}) — {r.get('target_locator', '')}
+• Location: {r.get('file_path', 'unknown')}:{r.get('line', '?')}
+• Detector: {r.get('detector', 'unknown')}
+• Service: {r.get('service', 'unknown')}
+• Severity: {str(r.get('severity', 'info')).upper()} (Confidence: {r.get('confidence', 0.0):.2f})
+• Triage Status: {r.get('triage_status', 'pending')} {f'({r.get("triage_notes")})' if r.get("triage_notes") else ''}
+• Secret Value: {secret_val}
+
+Code Context:
 ```
-{context_code}
+{r.get('context', '')}
 ```
+"""
 
-Operator Question:
-{user_question}"""
+    messages = [{"role": "system", "content": system_content}]
+    if conversation_history:
+        messages.extend(conversation_history[-6:])
+    messages.append({"role": "user", "content": user_question})
 
-            response = client.chat.completions.create(
-                model=ctx.cfg.llm.model,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.2,
-                max_tokens=900,
-            )
-            ans = response.choices[0].message.content or ""
-            return ans.strip()
-        except Exception as exc:
-            logger.warning("LLM Q&A query failed for finding #%d: %s", finding_id, exc)
-            # Fall through to offline response with failure note
+    try:
+        from openai import OpenAI
 
-    # Offline / rule-based fallback response
-    return _build_offline_response(row_dict, secret_val, user_question, has_llm)
+        client = OpenAI(
+            base_url=base_url,
+            api_key=api_key or "unused",
+            timeout=ctx.cfg.llm.timeout_seconds,
+            max_retries=2,
+        )
+
+        response = client.chat.completions.create(
+            model=ctx.cfg.llm.model,
+            messages=messages,
+            temperature=0.3,
+            max_tokens=1000,
+        )
+        ans = response.choices[0].message.content or ""
+        return ans.strip()
+    except Exception as exc:
+        logger.exception("LLM Q&A call failed: %s", exc)
+        return (
+            f"⚠️ **LLM Model Error**: `{exc}`\n\n"
+            f"The LLM provider could not complete your request. Please check:\n"
+            f"• **Base URL**: `{base_url}`\n"
+            f"• **Model**: `{ctx.cfg.llm.model}`\n"
+            f"• **API Key**: {'Configured' if api_key else 'Missing'}\n"
+            f"• Verify endpoint reachability and token quota."
+        )
 
 
-def _build_offline_response(row: dict, secret_val: str, question: str, had_llm_attempt: bool) -> str:
+def answer_finding_question(ctx: Any, finding_id: int, user_question: str) -> str:
+    """Backward-compatible wrapper for answering questions on a finding."""
+    return ask_security_assistant(ctx, user_question, finding_id=finding_id)
+
+
+def _build_offline_notice(row: dict, secret_val: str, finding_id: int) -> str:
     service = row.get("service", "generic")
     detector = row.get("detector", "unknown")
     severity = row.get("severity", "info")
@@ -104,32 +143,29 @@ def _build_offline_response(row: dict, secret_val: str, question: str, had_llm_a
     file_path = row.get("file_path", "")
     line = row.get("line", "")
 
-    # Basic service knowledge base
     service_advice = {
-        "aws": "AWS IAM / Secret credentials grant programmatic cloud access. Check IAM policies attached to the identity and review CloudTrail logs.",
-        "openai": "OpenAI API keys allow querying models and bill to the account owner. Revoke on platform.openai.com.",
-        "stripe": "Stripe secret keys (`sk_live_...`) allow full transaction and customer data control. Revoke in Stripe Dashboard.",
-        "google": "Google API keys (`AIza...`) may access Firebase, Maps, or GCP services depending on API key restrictions in Google Cloud Console.",
-        "firebase": "Firebase database URLs / tokens can allow reading or writing collections if security rules are unconfigured (`.read: true`).",
-        "github": "GitHub tokens allow accessing repos, packages, or org management. Revoke under GitHub Settings -> Developer settings.",
-        "gitlab": "GitLab Personal Access Tokens allow project and API control. Revoke under GitLab User Preferences -> Access Tokens.",
+        "aws": "AWS IAM / Secret credentials grant programmatic cloud access. Check IAM policies attached to the identity.",
+        "openai": "OpenAI API keys allow querying models and bill to account owner. Revoke on platform.openai.com.",
+        "stripe": "Stripe secret keys allow full transaction control. Revoke in Stripe Dashboard.",
+        "google": "Google API keys may access GCP/Firebase depending on restrictions in Google Cloud Console.",
+        "firebase": "Firebase database URLs / tokens can expose collections if security rules are unconfigured.",
+        "github": "GitHub tokens allow accessing repos, packages, or org management.",
+        "gitlab": "GitLab Personal Access Tokens allow project and API control.",
     }
-    advice = service_advice.get(service.lower(), f"Secrets for service `{service}` may expose backend APIs or data. Verify if this key is active with its provider.")
-
-    notice = ""
-    if had_llm_attempt:
-        notice = "⚠️ *(LLM query could not be completed; showing static analysis)*\n\n"
-    else:
-        notice = "ℹ️ *(LLM reasoning is disabled. Set `llm.enabled: true` or `LLM_API_KEY` for conversational AI)*\n\n"
+    advice = service_advice.get(service.lower(), f"Secrets for service `{service}` may expose backend APIs or data.")
 
     return (
-        f"{notice}### Finding #{row.get('id', '?')}: {detector} ({severity.upper()})\n"
+        f"ℹ️ **LLM reasoning is offline.** Set `llm.api_key` or `llm.enabled: true` in config/dashboard to ask dynamic questions.\n\n"
+        f"### Static Analysis for Finding #{finding_id}: {detector} ({severity.upper()})\n"
         f"• **Target:** `{target_name}`\n"
         f"• **Location:** `{file_path}:{line}`\n"
         f"• **Secret Value:** `{secret_val}`\n\n"
         f"**Service Impact:** {advice}\n\n"
-        f"**Remediation Steps:**\n"
-        f"1. Revoke the key immediately in the provider's management console.\n"
-        f"2. Issue a rotated credential and migrate to environment variables or secret vaults.\n"
-        f"3. Scrub commit history or publish an updated APK without embedded secrets."
+        f"**Recommended Remediation:**\n"
+        f"1. Revoke the key in the provider console.\n"
+        f"2. Issue a rotated credential.\n"
+        f"3. Remove hardcoded strings from code."
     )
+
+
+_build_offline_response = _build_offline_notice
