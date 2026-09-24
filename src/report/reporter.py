@@ -58,7 +58,7 @@ def run_report(ctx) -> dict:
     return generate(ctx)
 
 
-def generate(ctx) -> dict:
+def generate(ctx, notify_discord: bool = True) -> dict:
     rows = ctx.db.findings_for_report()
     contacts = _resolve_contacts(ctx, rows)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -111,7 +111,14 @@ def generate(ctx) -> dict:
     logger.info("report: %d findings -> %s / %s", len(rows), json_path, html_path)
     from ..activity import emit
     emit(ctx, "report", f"report generated: {html_path.name} ({len(rows)} findings)")
-    return {"findings": len(rows), "json": str(json_path), "html": str(html_path)}
+    res = {"findings": len(rows), "json": str(json_path), "html": str(html_path)}
+    if notify_discord:
+        try:
+            from ..notify import notify_report
+            notify_report(ctx, res)
+        except Exception as n_exc:
+            logger.warning("Discord report notification failed: %s", n_exc)
+    return res
 
 
 def _resolve_contacts(ctx, rows) -> dict[int, str]:

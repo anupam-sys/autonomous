@@ -1,6 +1,7 @@
 """Notification integrations (Discord interactive bot & webhooks)."""
 from __future__ import annotations
 
+from pathlib import Path
 import time
 import requests
 from .log import get_logger
@@ -98,3 +99,74 @@ def notify_finding(ctx, finding: dict, triage_status: str, triage_notes: str | N
             break
     except Exception as exc:
         logger.warning("Discord webhook failed: %s", exc)
+
+
+def notify_report(ctx, report_result: dict) -> None:
+    """Send generated report files (HTML + JSON) through Discord bot or webhook."""
+    discord = ctx.cfg.notifications.discord
+    if not discord.enabled:
+        return
+
+    # Try active Discord bot first (sends embed + attaches both files)
+    try:
+        from .bot import dispatch_bot_report
+        if dispatch_bot_report(ctx, report_result):
+            return
+    except Exception as exc:
+        logger.debug("Bot report dispatch skipped/failed: %s", exc)
+
+    if not discord.webhook_url:
+        return
+
+    html_p = Path(report_result.get("html", ""))
+    json_p = Path(report_result.get("json", ""))
+    findings_count = report_result.get("findings", 0)
+
+    embed = {
+        "title": "📊 Security Findings Report Generated",
+        "description": f"Generated report covering **{findings_count}** findings.",
+        "color": 3066993 if findings_count == 0 else 15105570,
+        "fields": [
+            {"name": "Total Findings", "value": str(findings_count), "inline": True},
+            {
+                "name": "Report Files",
+                "value": f"• `{html_p.name}` (Interactive HTML report)\n• `{json_p.name}` (Raw JSON findings export)",
+                "inline": False,
+            },
+        ],
+        "footer": {"text": "FAS Reporting Engine"},
+    }
+
+    payload = {
+        "content": f"📊 **New Security Findings Report** ({findings_count} findings)",
+        "embeds": [embed],
+    }
+
+    files = {}
+    opened = []
+    try:
+        if html_p.exists() and html_p.stat().st_size < 25_000_000:
+            f1 = open(html_p, "rb")
+            opened.append(f1)
+            files["files[0]"] = (html_p.name, f1, "text/html")
+        if json_p.exists() and json_p.stat().st_size < 25_000_000:
+            f2 = open(json_p, "rb")
+            opened.append(f2)
+            files["files[1]"] = (json_p.name, f2, "application/json")
+
+        import json
+        if files:
+            resp = requests.post(
+                discord.webhook_url,
+                data={"payload_json": json.dumps(payload)},
+                files=files,
+                timeout=30,
+            )
+        else:
+            resp = requests.post(discord.webhook_url, json=payload, timeout=10)
+        resp.raise_for_status()
+    except Exception as exc:
+        logger.warning("Discord webhook report notification failed: %s", exc)
+    finally:
+        for fh in opened:
+            fh.close()

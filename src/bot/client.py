@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 import re
 from typing import Any
 import discord
@@ -161,6 +162,47 @@ class FasDiscordBot(commands.Bot):
             return msg
         except Exception as exc:
             logger.warning("Failed to send finding embed to Discord: %s", exc)
+            return None
+
+    async def post_report_alert(self, report_data: dict) -> discord.Message | None:
+        """Post a report notification with attached HTML and JSON files."""
+        channel = self.get_alert_channel()
+        if not channel:
+            logger.warning("No accessible text channel found to post report alert.")
+            return None
+
+        findings_count = report_data.get("findings", 0)
+        html_p = Path(report_data.get("html", ""))
+        json_p = Path(report_data.get("json", ""))
+
+        embed = discord.Embed(
+            title="📊 Security Findings Report Generated",
+            description=f"Generated findings report covering **{findings_count}** findings.",
+            color=0x2ECC71 if findings_count == 0 else 0xE67E22,
+        )
+        embed.add_field(name="Total Findings", value=str(findings_count), inline=True)
+        if hasattr(self.ctx, "db"):
+            counts = self.ctx.db.counts()
+            embed.add_field(name="Pending Triage", value=str(counts.get("findings_pending_triage", 0)), inline=True)
+            embed.add_field(name="Bandwidth Today", value=f"{counts.get('bandwidth_today_mb', 0):.1f} MB", inline=True)
+
+        embed.add_field(
+            name="Report Files",
+            value=f"• `{html_p.name}` (Interactive HTML report)\n• `{json_p.name}` (Raw JSON findings export)",
+            inline=False,
+        )
+        embed.set_footer(text="FAS Reporting Engine • Download attached files to view full report")
+
+        files = []
+        if html_p.exists() and html_p.stat().st_size < 25_000_000:
+            files.append(discord.File(str(html_p), filename=html_p.name))
+        if json_p.exists() and json_p.stat().st_size < 25_000_000:
+            files.append(discord.File(str(json_p), filename=json_p.name))
+
+        try:
+            return await channel.send(embed=embed, files=files)
+        except Exception as exc:
+            logger.warning("Failed to post report alert to Discord: %s", exc)
             return None
 
     async def on_message(self, message: discord.Message) -> None:

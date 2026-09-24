@@ -239,7 +239,7 @@ def register_commands(bot: commands.Bot) -> None:
         )
 
     # ------------------ /report ------------------
-    @bot.tree.command(name="report", description="Generate current findings report")
+    @bot.tree.command(name="report", description="Generate and send current findings report with attached files")
     async def slash_report(interaction: discord.Interaction):
         if not bot.is_authorized(interaction.user.id):
             await interaction.response.send_message("⛔ Unauthorized.", ephemeral=True)
@@ -248,8 +248,71 @@ def register_commands(bot: commands.Bot) -> None:
         await interaction.response.defer()
         from ..report.reporter import generate
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(None, generate, ctx)
-        await interaction.followup.send(f"📊 **Report Generated**: `{result}`")
+        result = await loop.run_in_executor(None, generate, ctx, False)
+
+        html_p = Path(result["html"])
+        json_p = Path(result["json"])
+        findings_count = result.get("findings", 0)
+
+        embed = discord.Embed(
+            title="📊 Security Findings Report Generated",
+            description=f"Generated findings report covering **{findings_count}** findings.",
+            color=0x2ECC71 if findings_count == 0 else 0xE67E22,
+        )
+        embed.add_field(name="Total Findings", value=str(findings_count), inline=True)
+        counts = ctx.db.counts()
+        embed.add_field(name="Pending Triage", value=str(counts.get("findings_pending_triage", 0)), inline=True)
+        embed.add_field(name="Bandwidth Today", value=f"{counts.get('bandwidth_today_mb', 0):.1f} MB", inline=True)
+        embed.add_field(
+            name="Report Files",
+            value=f"• `{html_p.name}` (Interactive HTML report attached)\n• `{json_p.name}` (Raw JSON findings export attached)",
+            inline=False,
+        )
+        embed.set_footer(text="FAS Reporting Engine • Download attached files to view full report")
+
+        files = []
+        if html_p.exists() and html_p.stat().st_size < 25_000_000:
+            files.append(discord.File(str(html_p), filename=html_p.name))
+        if json_p.exists() and json_p.stat().st_size < 25_000_000:
+            files.append(discord.File(str(json_p), filename=json_p.name))
+
+        await interaction.followup.send(embed=embed, files=files)
+
+    @bot.command(name="report")
+    async def cmd_report(c):
+        if not bot.is_authorized(c.author.id):
+            return
+        from ..report.reporter import generate
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, generate, ctx, False)
+
+        html_p = Path(result["html"])
+        json_p = Path(result["json"])
+        findings_count = result.get("findings", 0)
+
+        embed = discord.Embed(
+            title="📊 Security Findings Report Generated",
+            description=f"Generated findings report covering **{findings_count}** findings.",
+            color=0x2ECC71 if findings_count == 0 else 0xE67E22,
+        )
+        embed.add_field(name="Total Findings", value=str(findings_count), inline=True)
+        counts = ctx.db.counts()
+        embed.add_field(name="Pending Triage", value=str(counts.get("findings_pending_triage", 0)), inline=True)
+        embed.add_field(name="Bandwidth Today", value=f"{counts.get('bandwidth_today_mb', 0):.1f} MB", inline=True)
+        embed.add_field(
+            name="Report Files",
+            value=f"• `{html_p.name}` (Interactive HTML report attached)\n• `{json_p.name}` (Raw JSON findings export attached)",
+            inline=False,
+        )
+        embed.set_footer(text="FAS Reporting Engine • Download attached files to view full report")
+
+        files = []
+        if html_p.exists() and html_p.stat().st_size < 25_000_000:
+            files.append(discord.File(str(html_p), filename=html_p.name))
+        if json_p.exists() and json_p.stat().st_size < 25_000_000:
+            files.append(discord.File(str(json_p), filename=json_p.name))
+
+        await c.send(embed=embed, files=files)
 
     # ------------------ /help ------------------
     @bot.tree.command(name="help", description="Show available commands and bot capabilities")

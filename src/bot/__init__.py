@@ -81,3 +81,20 @@ def dispatch_bot_finding(ctx: Any, finding: dict, triage_status: str, triage_not
     except Exception as exc:
         logger.warning("Failed to dispatch finding alert to Discord bot loop: %s", exc)
         return False
+
+
+def dispatch_bot_report(ctx: Any, report_data: dict) -> bool:
+    """Dispatch a report notification with files to the active Discord bot if available."""
+    bot = get_active_bot()
+    if bot is None or not bot.is_ready() or bot.loop is None:
+        return False
+
+    try:
+        asyncio.run_coroutine_threadsafe(
+            bot.post_report_alert(report_data),
+            bot.loop,
+        )
+        return True
+    except Exception as exc:
+        logger.warning("Failed to dispatch report alert to Discord bot loop: %s", exc)
+        return False

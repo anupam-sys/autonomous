@@ -13,7 +13,7 @@ from src.bot.scanner import scan_target_on_demand
 
 
 class DummyContext:
-    def __init__(self, cfg, db, queue=None):
+    def __init__(self, cfg, db=None, queue=None):
         self.cfg = cfg
         self.db = db
         self.queue = queue
@@ -232,3 +232,64 @@ def test_scan_target_on_demand_repo(cfg, db, tmp_path):
         assert res["status"] == "completed"
         assert res["target_name"] == "example/mock"
         assert res["findings_new"] >= 1
+
+
+@pytest.mark.anyio
+async def test_bot_post_report_alert(cfg, db, tmp_path):
+    html_f = tmp_path / "report.html"
+    json_f = tmp_path / "report.json"
+    html_f.write_text("<h1>Report</h1>", encoding="utf-8")
+    json_f.write_text("{}", encoding="utf-8")
+
+    ctx = DummyContext(cfg, db)
+    bot = FasDiscordBot(ctx)
+
+    mock_channel = AsyncMock()
+    mock_msg = AsyncMock()
+    mock_channel.send = AsyncMock(return_value=mock_msg)
+    bot.get_alert_channel = MagicMock(return_value=mock_channel)
+
+    report_data = {
+        "findings": 5,
+        "html": str(html_f),
+        "json": str(json_f),
+    }
+
+    msg = await bot.post_report_alert(report_data)
+    assert msg == mock_msg
+    assert mock_channel.send.called
+    kwargs = mock_channel.send.call_args[1]
+    embed = kwargs["embed"]
+    assert "Security Findings Report" in embed.title
+    assert len(kwargs["files"]) == 2
+
+
+def test_notify_report_webhook(cfg, tmp_path):
+    html_f = tmp_path / "report.html"
+    json_f = tmp_path / "report.json"
+    html_f.write_text("<h1>Report</h1>", encoding="utf-8")
+    json_f.write_text("{}", encoding="utf-8")
+
+    cfg.notifications.discord.enabled = True
+    cfg.notifications.discord.webhook_url = "https://discord.com/api/webhooks/test"
+
+    ctx = DummyContext(cfg)
+    report_data = {
+        "findings": 3,
+        "html": str(html_f),
+        "json": str(json_f),
+    }
+
+    with patch("requests.post") as mock_post:
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_post.return_value = mock_resp
+
+        from src.notify import notify_report
+        notify_report(ctx, report_data)
+
+        assert mock_post.called
+        call_kwargs = mock_post.call_args[1]
+        assert "files" in call_kwargs and call_kwargs["files"] is not None
+        assert "files[0]" in call_kwargs["files"]
+        assert "files[1]" in call_kwargs["files"]
