@@ -267,6 +267,24 @@ def create_app(cfg: Config, db: Database | None = None) -> Flask:
         fresh = Config.load(getattr(cfg, "_base_path", "config.yaml"), overlay)
         for f in dataclasses.fields(Config):
             setattr(cfg, f.name, getattr(fresh, f.name))
+
+        if fresh.notifications.discord.enabled and fresh.notifications.discord.bot_token and db is not None:
+            try:
+                from ..bot import get_active_bot, start_discord_bot
+                from ..queue import WorkQueue
+
+                if get_active_bot() is None:
+                    class _WebCtx:
+                        def __init__(self, c, d):
+                            self.cfg = c
+                            self.db = d
+                            self.queue = WorkQueue(d)
+
+                    start_discord_bot(_WebCtx(fresh, db))
+                    logger.info("interactive discord bot started via web dashboard")
+            except Exception as b_exc:
+                logger.debug("bot auto-start via web dashboard: %s", b_exc)
+
         return jsonify({"ok": True, "applied": sorted(clean),
                         "config": _sanitized_config(fresh)})
 

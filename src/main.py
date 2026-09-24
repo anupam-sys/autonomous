@@ -48,6 +48,14 @@ def run_pass(ctx: Context) -> None:
         ctx.cfg = Config.load(ctx.cfg._base_path, ctx.cfg._overlay_path)
     except Exception:
         logger.exception("config reload failed; keeping previous config")
+
+    if ctx.cfg.notifications.discord.enabled and ctx.cfg.notifications.discord.bot_token:
+        from .bot import get_active_bot, start_discord_bot
+
+        if get_active_bot() is None:
+            start_discord_bot(ctx)
+            logger.info("interactive discord bot started in background")
+
     for stage in STAGES:
         run_id = ctx.db.start_run(getattr(stage, "__name__", str(stage)))
         try:
