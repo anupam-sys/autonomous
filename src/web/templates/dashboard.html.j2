@@ -456,9 +456,12 @@ const CFG_SECTIONS = [
     ['web.port', 'int', 'TELEMETRY PORT (RESTART)'],
     ['web.token', 'secret', 'TELEMETRY TOKEN (RESTART)'],
   ]],
-  ['ALERTS', [
+  ['ALERTS & DISCORD BOT', [
     ['notifications.discord.enabled', 'bool', 'DISCORD LINK ACTIVE'],
-    ['notifications.discord.webhook_url', 'secret', 'DISCORD WEBHOOK ENDPOINT'],
+    ['notifications.discord.bot_token', 'secret', 'DISCORD BOT TOKEN'],
+    ['notifications.discord.channel_id', 'str', 'ALERT CHANNEL ID'],
+    ['notifications.discord.create_threads', 'bool', 'CREATE DISCUSSION THREADS'],
+    ['notifications.discord.webhook_url', 'secret', 'DISCORD WEBHOOK ENDPOINT (OPTIONAL)'],
     ['notifications.discord.notify_on', 'choice:any,high_severity,true_positive', 'ALERT CONDITION'],
   ]],
 ];

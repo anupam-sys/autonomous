@@ -59,9 +59,12 @@ class FasDiscordBot(commands.Bot):
         """Find configured alert channel or first available text channel."""
         cid = getattr(self.ctx.cfg.notifications.discord, "channel_id", None)
         if cid:
-            channel = self.get_channel(int(cid))
-            if channel:
-                return channel
+            try:
+                channel = self.get_channel(int(cid))
+                if channel:
+                    return channel
+            except (ValueError, TypeError):
+                pass
 
         for guild in self.guilds:
             for ch in guild.text_channels:

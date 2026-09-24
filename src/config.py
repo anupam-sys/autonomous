@@ -147,7 +147,7 @@ class DiscordConfig:
     enabled: bool = False
     webhook_url: str = ""
     bot_token: str = ""
-    channel_id: int | None = None
+    channel_id: int | str | None = None
     authorized_users: list[int] = field(default_factory=list)
     notify_on: str = "any"  # any, high_severity, true_positive
     create_threads: bool = True

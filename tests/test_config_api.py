@@ -108,3 +108,25 @@ def test_config_post_secret_writeonly(web_client):
     assert r.status_code == 200
     assert "sk-new-key" in overlay.read_text()          # persisted
     assert "sk-new-key" not in str(r.get_json())         # but never echoed
+
+
+def test_config_discord_bot_settings(web_client):
+    client, overlay = web_client
+    r = client.post("/api/config", json={"updates": {
+        "notifications.discord.enabled": True,
+        "notifications.discord.bot_token": "discord-bot-secret-token",
+        "notifications.discord.channel_id": "123456789012345678",
+        "notifications.discord.create_threads": True,
+    }})
+    assert r.status_code == 200
+    text = overlay.read_text()
+    assert "discord-bot-secret-token" in text
+    assert "123456789012345678" in text
+
+    # When querying config via API without reveal, token is masked
+    d = client.get("/api/config").get_json()
+    assert d["secrets_set"]["notifications.discord.bot_token"] is True
+
+    # When querying config with reveal, token is visible
+    d_rev = client.get("/api/config?reveal=1").get_json()
+    assert d_rev["secrets"]["notifications.discord.bot_token"] == "discord-bot-secret-token"

@@ -73,7 +73,7 @@ EDITABLE: dict[str, str] = {
     "notifications.discord.enabled": "bool",
     "notifications.discord.webhook_url": "secret",
     "notifications.discord.bot_token": "secret",
-    "notifications.discord.channel_id": "int",
+    "notifications.discord.channel_id": "str",
     "notifications.discord.create_threads": "bool",
     "notifications.discord.notify_on": "choice:any,high_severity,true_positive",
 }
