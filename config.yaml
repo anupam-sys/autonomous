@@ -70,6 +70,7 @@ llm:
   timeout_seconds: 60
   triage_confidence_floor: 0.5  # only LLM-triage findings at/above this confidence
   max_findings_per_run: 100     # LLM cost cap per pipeline pass
+  batch_size: 15                # findings triaged per request (saves API calls)
   ai_discovery:
     enabled: false
     allow_auto_dorks: false     # false = suggestions wait for approval in DB

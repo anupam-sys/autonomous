@@ -98,6 +98,7 @@ class LlmConfig:
     timeout_seconds: int = 60
     triage_confidence_floor: float = 0.5
     max_findings_per_run: int = 100
+    batch_size: int = 15
     ai_discovery: AiDiscoveryConfig = field(default_factory=AiDiscoveryConfig)
 
 

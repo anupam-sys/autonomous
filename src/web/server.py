@@ -32,6 +32,7 @@ EDITABLE: dict[str, str] = {
     "llm.enabled": "bool", "llm.base_url": "str", "llm.api_key": "secret",
     "llm.model": "str", "llm.timeout_seconds": "int",
     "llm.triage_confidence_floor": "float", "llm.max_findings_per_run": "int",
+    "llm.batch_size": "int",
     "llm.ai_discovery.enabled": "bool", "llm.ai_discovery.allow_auto_dorks": "bool",
     "llm.ai_discovery.interval_hours": "int",
     "limits.workers": "int", "limits.jadx_concurrency": "int",
@@ -195,14 +196,29 @@ def create_app(cfg: Config, db: Database | None = None) -> Flask:
 
     @app.get("/api/config")
     def get_config():
+        overlay = getattr(cfg, "_overlay_path", "config.local.yaml")
+        base = getattr(cfg, "_base_path", "config.yaml")
+        try:
+            fresh = Config.load(base, overlay)
+            for f in dataclasses.fields(Config):
+                setattr(cfg, f.name, getattr(fresh, f.name))
+        except Exception:
+            pass
+
+        cfg_dict = dataclasses.asdict(cfg)
         secrets_set = {
-            p: bool(_dig(dataclasses.asdict(cfg), p)) for p in SECRET_PATHS
+            p: bool(_dig(cfg_dict, p)) for p in SECRET_PATHS
         }
-        return jsonify({
+        res = {
             "config": _sanitized_config(cfg),
             "secrets_set": secrets_set,
             "editable": EDITABLE,
-        })
+        }
+        if request.args.get("reveal") == "1" and _write_allowed():
+            res["secrets"] = {
+                p: (_dig(cfg_dict, p) or "") for p in SECRET_PATHS
+            }
+        return jsonify(res)
 
     @app.post("/api/config")
     def post_config():
@@ -232,6 +248,8 @@ def create_app(cfg: Config, db: Database | None = None) -> Flask:
             return jsonify({"error": f"write failed: {exc}"}), 500
         logger.info("config updated via dashboard: %s", sorted(clean))
         fresh = Config.load(getattr(cfg, "_base_path", "config.yaml"), overlay)
+        for f in dataclasses.fields(Config):
+            setattr(cfg, f.name, getattr(fresh, f.name))
         return jsonify({"ok": True, "applied": sorted(clean),
                         "config": _sanitized_config(fresh)})
 

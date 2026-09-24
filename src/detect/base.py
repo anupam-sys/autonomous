@@ -69,6 +69,7 @@ def run_scan(ctx) -> dict:
                         "file_path": f.file_path,
                         "line": f.line,
                         "secret_preview": f.secret_preview,
+                        "secret_full": f.secret_full,
                     }, "pending")
         stats["scanned"] += 1
         stats["files"] += files

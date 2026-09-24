@@ -70,6 +70,15 @@ def test_config_get_masked(web_client):
     assert d["config"]["llm"]["api_key"] == ""
 
 
+def test_config_get_reveal(web_client):
+    client, overlay = web_client
+    # Set a secret in overlay
+    client.post("/api/config", json={"updates": {"llm.api_key": "sk-secret-test-key"}})
+    d = client.get("/api/config?reveal=1").get_json()
+    assert "secrets" in d
+    assert d["secrets"]["llm.api_key"] == "sk-secret-test-key"
+
+
 def test_config_post_writes_overlay(web_client):
     client, overlay = web_client
     r = client.post("/api/config", json={"updates": {
