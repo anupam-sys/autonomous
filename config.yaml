@@ -102,4 +102,15 @@ report:
                                 # to go back to preview-only everywhere.
   disclosure_lookup: true       # fetch security.txt contact for each org
 
+# --- notifications & interactive bot ---
+notifications:
+  discord:
+    enabled: false              # set true to activate Discord alerts
+    webhook_url: ""             # simple one-way webhook (optional)
+    bot_token: ""               # Discord Bot token (for interactive threads, Q&A, and scanning)
+    channel_id: null            # Discord Channel ID where finding alerts are posted
+    authorized_users: []        # List of Discord user IDs allowed to run commands (empty = all in channel)
+    notify_on: "any"            # any | high_severity | true_positive ("any" = instant alerts)
+    create_threads: true        # create interactive thread for each finding to chat/ask questions
+
 log_level: "INFO"

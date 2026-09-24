@@ -24,7 +24,13 @@ from ..log import get_logger
 logger = get_logger("web")
 
 # paths whose values are write-only over the API
-SECRET_PATHS = {"llm.api_key", "discovery.github_recent.token", "web.token", "notifications.discord.webhook_url"}
+SECRET_PATHS = {
+    "llm.api_key",
+    "discovery.github_recent.token",
+    "web.token",
+    "notifications.discord.webhook_url",
+    "notifications.discord.bot_token",
+}
 
 # editable config whitelist: dotted path -> type
 # (bool | int | float | str | secret | list | choice:a,b,c)
@@ -66,6 +72,9 @@ EDITABLE: dict[str, str] = {
     "web.host": "str", "web.port": "int", "web.token": "secret",
     "notifications.discord.enabled": "bool",
     "notifications.discord.webhook_url": "secret",
+    "notifications.discord.bot_token": "secret",
+    "notifications.discord.channel_id": "int",
+    "notifications.discord.create_threads": "bool",
     "notifications.discord.notify_on": "choice:any,high_severity,true_positive",
 }
 

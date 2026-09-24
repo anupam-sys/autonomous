@@ -4,3 +4,4 @@ openai>=1.40.0,<3.0.0
 beautifulsoup4>=4.12.0,<5
 flask>=3.0,<4
 cryptography>=41
+discord.py>=2.3.0,<3

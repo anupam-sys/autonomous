@@ -1,4 +1,4 @@
-"""Notification integrations (e.g. Discord webhooks)."""
+"""Notification integrations (Discord interactive bot & webhooks)."""
 from __future__ import annotations
 
 import time
@@ -7,14 +7,27 @@ from .log import get_logger
 
 logger = get_logger("notify")
 
+
 def notify_finding(ctx, finding: dict, triage_status: str, triage_notes: str | None = None) -> None:
     discord = ctx.cfg.notifications.discord
-    if not discord.enabled or not discord.webhook_url:
+    if not discord.enabled:
         return
-        
+
     if discord.notify_on == "true_positive" and triage_status != "true_positive":
         return
     if discord.notify_on == "high_severity" and finding.get("severity") not in ("critical", "high"):
+        return
+
+    # Try interactive Discord Bot first (creates threads & enables instant interactive chat)
+    bot_dispatched = False
+    try:
+        from .bot import dispatch_bot_finding
+        bot_dispatched = dispatch_bot_finding(ctx, finding, triage_status, triage_notes)
+    except Exception as b_exc:
+        logger.debug("Bot dispatch skipped or failed: %s", b_exc)
+
+    # If webhook URL is configured, also post to webhook (or fallback if bot inactive)
+    if not discord.webhook_url:
         return
 
     # Retrieve full uncensored key
@@ -41,29 +54,35 @@ def notify_finding(ctx, finding: dict, triage_status: str, triage_notes: str | N
     severity = str(finding.get("severity", "info"))
     detector = finding.get("detector", "unknown")
     service = finding.get("service", "unknown")
+    fid = finding.get("id")
 
+    fields = [
+        {"name": "Target", "value": f"{target_name} ({target_kind})", "inline": True},
+        {"name": "Location", "value": f"`{file_path}:{line}`", "inline": True},
+        {"name": "Triage", "value": triage_status, "inline": True},
+    ]
+    if fid:
+        fields.append({"name": "Finding ID", "value": f"`#{fid}`", "inline": True})
+    fields.append({"name": "Full Key / Secret", "value": secret_formatted, "inline": False})
+
+    if triage_notes:
+        fields.append({
+            "name": "Triage Notes",
+            "value": str(triage_notes)[:1000],
+            "inline": False,
+        })
+
+    title_prefix = f"Finding #{fid}: " if fid else ""
     payload = {
         "content": f"🚨 **New Secret Finding** [{severity.upper()}]",
         "embeds": [{
-            "title": f"{detector} ({service})",
+            "title": f"{title_prefix}{detector} ({service})",
             "color": 16711680 if severity in ("critical", "high") else 16753920,
-            "fields": [
-                {"name": "Target", "value": f"{target_name} ({target_kind})", "inline": True},
-                {"name": "Location", "value": f"`{file_path}:{line}`", "inline": True},
-                {"name": "Triage", "value": triage_status, "inline": True},
-                {"name": "Full Key / Secret", "value": secret_formatted, "inline": False},
-            ],
-            "footer": {"text": "FAS Pipeline"}
-        }]
+            "fields": fields,
+            "footer": {"text": "FAS Pipeline"},
+        }],
     }
-    
-    if triage_notes:
-        payload["embeds"][0]["fields"].append({
-            "name": "Triage Notes",
-            "value": str(triage_notes)[:1000],
-            "inline": False
-        })
-        
+
     try:
         for attempt in range(3):
             resp = requests.post(discord.webhook_url, json=payload, timeout=10)

@@ -123,6 +123,20 @@ def _process_apk(ctx, target: Target, data: Path, slug: str) -> tuple[Artifact, 
                  f"[{f.severity.upper()}] {f.detector} ({f.service}) "
                  f"in {f.file_path} = {f.secret_preview}",
                  target.name, level="finding")
+            if ctx.cfg.notifications.discord.notify_on in ("any", "high_severity"):
+                from ..notify import notify_finding
+                notify_finding(ctx, {
+                    "id": f.id,
+                    "severity": f.severity,
+                    "detector": f.detector,
+                    "service": f.service,
+                    "target_name": target.name,
+                    "target_kind": target.kind.value,
+                    "file_path": f.file_path,
+                    "line": f.line,
+                    "secret_preview": f.secret_preview,
+                    "secret_full": f.secret_full,
+                }, "pending")
     _store_url_findings(ctx, target, bres)
     emit(ctx, "detect",
          f"{target.name}: byte-scan done — {bres.entries_scanned} entries, "

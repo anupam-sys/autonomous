@@ -155,6 +155,12 @@ def cmd_run(cfg: Config, once: bool) -> None:
         thread.start()
         logger.info("dashboard: http://%s:%d", cfg.web.host, cfg.web.port)
 
+    if cfg.notifications.discord.enabled and cfg.notifications.discord.bot_token:
+        from .bot import start_discord_bot
+
+        start_discord_bot(ctx)
+        logger.info("interactive discord bot started in background")
+
     if not STAGES:
         logger.warning("no stages registered yet (skeleton build)")
     if once:
@@ -198,6 +204,16 @@ def cmd_web(cfg: Config) -> None:
 
     db = Database(cfg.paths.db_path)
     run_web(cfg, db)
+
+
+def cmd_discord(cfg: Config) -> None:
+    """Run interactive Discord bot in foreground."""
+    cfg.ensure_dirs()
+    db = Database(cfg.paths.db_path)
+    ctx = Context(cfg, db, WorkQueue(db))
+    from .bot import run_discord_bot_blocking
+
+    run_discord_bot_blocking(ctx)
 
 
 def cmd_reveal(cfg: Config, finding_id: int) -> None:
@@ -252,6 +268,7 @@ def main() -> None:
     sub.add_parser("prune", help="clean spam/noise from queue and prioritize targets")
     sub.add_parser("report", help="generate JSON+HTML report now")
     sub.add_parser("web", help="run the transparency dashboard (standalone)")
+    sub.add_parser("discord", help="run the interactive Discord bot (standalone)")
     rev_p = sub.add_parser("reveal", help="print a finding with its full secret value")
     rev_p.add_argument("id", type=int)
     sug_p = sub.add_parser("suggestions", help="manage LLM discovery suggestions")
@@ -274,6 +291,8 @@ def main() -> None:
         cmd_report(cfg)
     elif args.command == "web":
         cmd_web(cfg)
+    elif args.command == "discord":
+        cmd_discord(cfg)
     elif args.command == "reveal":
         cmd_reveal(cfg, args.id)
     elif args.command == "suggestions":

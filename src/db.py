@@ -293,7 +293,19 @@ class Database:
                     (enc, f.secret_hash, f.target_id, f.file_path, f.line),
                 )
                 return False
+            f.id = cur.lastrowid
             return True
+
+    def get_finding(self, finding_id: int) -> sqlite3.Row | None:
+        """Get a single finding by ID, joined with target details."""
+        with self._lock:
+            return self._conn.execute(
+                """SELECT f.*, t.name AS target_name, t.kind AS target_kind,
+                          t.locator AS target_locator, t.source AS target_source
+                   FROM findings f JOIN targets t ON t.id = f.target_id
+                   WHERE f.id = ?""",
+                (finding_id,),
+            ).fetchone()
 
     def get_finding_secret(self, finding_id: int) -> str | None:
         """Decrypt and return the full secret value (or None if not stored)."""

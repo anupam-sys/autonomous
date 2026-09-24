@@ -146,7 +146,11 @@ class ReportConfig:
 class DiscordConfig:
     enabled: bool = False
     webhook_url: str = ""
-    notify_on: str = "true_positive"  # any, high_severity, true_positive
+    bot_token: str = ""
+    channel_id: int | None = None
+    authorized_users: list[int] = field(default_factory=list)
+    notify_on: str = "any"  # any, high_severity, true_positive
+    create_threads: bool = True
 
 
 @dataclass
@@ -204,6 +208,22 @@ class Config:
             self.llm.model = env["LLM_MODEL"]
         if env.get("GITLAB_TOKEN"):
             self.gitlab_token = env["GITLAB_TOKEN"]  # consumed by gitlab source
+        if env.get("DISCORD_ENABLED"):
+            self.notifications.discord.enabled = env["DISCORD_ENABLED"].lower() in ("1", "true", "yes")
+        if env.get("DISCORD_WEBHOOK_URL"):
+            self.notifications.discord.webhook_url = env["DISCORD_WEBHOOK_URL"]
+        if env.get("DISCORD_BOT_TOKEN"):
+            self.notifications.discord.bot_token = env["DISCORD_BOT_TOKEN"]
+            self.notifications.discord.enabled = True
+        if env.get("DISCORD_CHANNEL_ID"):
+            try:
+                self.notifications.discord.channel_id = int(env["DISCORD_CHANNEL_ID"])
+            except ValueError:
+                pass
+        if env.get("DISCORD_NOTIFY_ON"):
+            self.notifications.discord.notify_on = env["DISCORD_NOTIFY_ON"]
+        if env.get("DISCORD_CREATE_THREADS"):
+            self.notifications.discord.create_threads = env["DISCORD_CREATE_THREADS"].lower() in ("1", "true", "yes")
 
     def ensure_dirs(self) -> None:
         Path(self.paths.data_dir).mkdir(parents=True, exist_ok=True)

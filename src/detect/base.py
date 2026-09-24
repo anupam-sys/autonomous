@@ -61,6 +61,7 @@ def run_scan(ctx) -> dict:
                 if ctx.cfg.notifications.discord.notify_on in ("any", "high_severity"):
                     from ..notify import notify_finding
                     notify_finding(ctx, {
+                        "id": f.id,
                         "severity": f.severity,
                         "detector": f.detector,
                         "service": f.service,
