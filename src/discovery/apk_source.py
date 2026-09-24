@@ -14,6 +14,7 @@ from bs4 import BeautifulSoup
 from ..http_utils import PoliteSession, HttpError
 from ..log import get_logger
 from ..models import Target, TargetKind
+from .intelligence import evaluate_target
 
 logger = get_logger("discovery.apk")
 
@@ -95,6 +96,9 @@ class ApkMirrorSource:
             return
         soup = BeautifulSoup(resp.text, "html.parser")
         seen: set[str] = set()
+        intel_cfg = getattr(ctx.cfg.discovery, "intelligence", None)
+        intel_enabled = getattr(intel_cfg, "enabled", True) if intel_cfg else True
+
         for a in soup.select("a[href*='-release/']"):
             href = a.get("href", "")
             m = re.match(r"^(/apk/[^/]+/[^/]+/[^/]+-release/)", href)
@@ -105,12 +109,18 @@ class ApkMirrorSource:
                 continue
             seen.add(page)
             slug = m.group(1).rstrip("/").split("/")[-1]
-            yield Target(
+            target = Target(
                 kind=TargetKind.APK,
                 source=self.name,
                 locator=page,  # acquisition resolves the real file URL
                 name=slug,
             )
+            if intel_enabled:
+                ev = evaluate_target(target, cfg=intel_cfg)
+                if not ev.keep:
+                    continue
+                target.priority = ev.score
+            yield target
         logger.info("apkmirror yielded %d release pages", len(seen))
 
 
@@ -128,6 +138,9 @@ class ApkPureSource:
             return
         soup = BeautifulSoup(resp.text, "html.parser")
         seen: set[str] = set()
+        intel_cfg = getattr(ctx.cfg.discovery, "intelligence", None)
+        intel_enabled = getattr(intel_cfg, "enabled", True) if intel_cfg else True
+
         for a in soup.select("a[href]"):
             href = a.get("href", "")
             m = re.search(r"/([a-z0-9\-]+)/(com\.[A-Za-z0-9_.]+)$", href)
@@ -137,12 +150,18 @@ class ApkPureSource:
             if pkg in seen:
                 continue
             seen.add(pkg)
-            yield Target(
+            target = Target(
                 kind=TargetKind.APK,
                 source=self.name,
                 locator=f"apkpure://{pkg}",  # resolved by acquisition
                 name=pkg,
             )
+            if intel_enabled:
+                ev = evaluate_target(target, cfg=intel_cfg)
+                if not ev.keep:
+                    continue
+                target.priority = ev.score
+            yield target
         logger.info("apkpure yielded %d packages", len(seen))
 
 

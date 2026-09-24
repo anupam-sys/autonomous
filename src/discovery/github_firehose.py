@@ -12,6 +12,7 @@ from typing import Iterable
 from ..http_utils import PoliteSession
 from ..log import get_logger
 from ..models import Target, TargetKind
+from .intelligence import evaluate_target
 
 logger = get_logger("discovery.firehose")
 
@@ -32,6 +33,9 @@ class FirehoseSource:
             headers["Authorization"] = f"Bearer {ctx.cfg.discovery.github_recent.token}"
         resp = http.get(EVENTS_URL, params={"per_page": self.per_page}, headers=headers)
         seen: set[str] = set()
+        intel_cfg = getattr(ctx.cfg.discovery, "intelligence", None)
+        intel_enabled = getattr(intel_cfg, "enabled", True) if intel_cfg else True
+
         for event in resp.json():
             if event.get("type") not in WANTED:
                 continue
@@ -40,10 +44,19 @@ class FirehoseSource:
             if not name or name in seen:
                 continue
             seen.add(name)
-            yield Target(
+
+            target = Target(
                 kind=TargetKind.REPO,
                 source=self.name,
                 locator=f"https://github.com/{name}.git",
                 name=name,
             )
+
+            if intel_enabled:
+                ev = evaluate_target(target, cfg=intel_cfg)
+                if not ev.keep:
+                    continue
+                target.priority = ev.score
+
+            yield target
         logger.info("firehose yielded %d repos", len(seen))

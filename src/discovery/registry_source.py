@@ -13,6 +13,7 @@ from urllib.parse import quote
 from ..http_utils import PoliteSession, HttpError
 from ..log import get_logger
 from ..models import Target, TargetKind
+from .intelligence import evaluate_target
 
 logger = get_logger("discovery.registries")
 
@@ -31,6 +32,8 @@ class NpmSource:
     def discover(self, ctx) -> Iterable[Target]:
         http = PoliteSession(min_interval=2.0)
         since = ctx.db.get_kv("npm_since") or "0"
+        intel_cfg = getattr(ctx.cfg.discovery, "intelligence", None)
+        intel_enabled = getattr(intel_cfg, "enabled", True) if intel_cfg else True
         try:
             resp = http.get(NPM_CHANGES, params={"since": since, "limit": 100})
         except HttpError as exc:
@@ -46,13 +49,26 @@ class NpmSource:
                 tarball = (meta.get("dist") or {}).get("tarball")
                 version = meta.get("version", "")
                 if tarball:
-                    yield Target(
+                    target = Target(
                         kind=TargetKind.PACKAGE,
                         source=self.name,
                         locator=tarball,
                         name=f"npm:{pkg}",
                         version=str(version),
                     )
+                    if intel_enabled:
+                        desc = meta.get("description") or ""
+                        kws = meta.get("keywords") or []
+                        kws_str = " ".join(kws) if isinstance(kws, list) else str(kws)
+                        ev = evaluate_target(
+                            target,
+                            metadata={"description": f"{desc} {kws_str}"},
+                            cfg=intel_cfg,
+                        )
+                        if not ev.keep:
+                            continue
+                        target.priority = ev.score
+                    yield target
             except HttpError:
                 continue
         if last_seq:
@@ -67,6 +83,8 @@ class PypiSource:
 
     def discover(self, ctx) -> Iterable[Target]:
         http = PoliteSession(min_interval=2.0)
+        intel_cfg = getattr(ctx.cfg.discovery, "intelligence", None)
+        intel_enabled = getattr(intel_cfg, "enabled", True) if intel_cfg else True
         try:
             resp = http.get(PYPI_UPDATES_RSS)
         except HttpError as exc:
@@ -92,14 +110,29 @@ class PypiSource:
                 continue
             for url_info in meta.get("urls", []):
                 if url_info.get("packagetype") == "sdist":
-                    resolved += 1
-                    yield Target(
+                    target = Target(
                         kind=TargetKind.PACKAGE,
                         source=self.name,
                         locator=url_info["url"],
                         name=f"pypi:{name}",
                         version=version,
                     )
+                    if intel_enabled:
+                        info = meta.get("info") or {}
+                        summary = info.get("summary") or ""
+                        kws = info.get("keywords") or ""
+                        desc = (info.get("description") or "")[:400]
+                        ev = evaluate_target(
+                            target,
+                            metadata={"description": f"{summary} {kws} {desc}"},
+                            cfg=intel_cfg,
+                        )
+                        if not ev.keep:
+                            logger.debug("skipping low-signal pypi package %s: %s", name, ev.reason)
+                            continue
+                        target.priority = ev.score
+                    resolved += 1
+                    yield target
                     break
 
 

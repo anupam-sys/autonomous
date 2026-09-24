@@ -50,6 +50,30 @@ class RegistriesConfig:
 
 
 @dataclass
+class IntelligenceConfig:
+    enabled: bool = True
+    min_relevance_score: float = 0.25
+    filter_spam: bool = True
+    filter_forks: bool = True
+    filter_noise_types: bool = True
+    filter_system_apks: bool = True
+    smart_git_filter: bool = True
+    selective_extract: bool = True
+    target_keywords: list[str] = field(default_factory=lambda: [
+        "api", "auth", "token", "secret", "key", "cred", "config", "env",
+        "backend", "server", "service", "client", "sdk", "bot", "webhook",
+        "cloud", "aws", "azure", "gcp", "database", "payment", "stripe",
+        "openai", "connect", "internal", "admin", "gateway", "infra"
+    ])
+    exclude_keywords: list[str] = field(default_factory=lambda: [
+        "awesome-", "curated-", "cheatsheet", "interview", "leetcode",
+        "hackerrank", "homework", "assignment", "coursework", "tutorial",
+        "syllabus", "wallpaper", "icon-theme", "dotfiles", "translation",
+        "i18n", "subtitles", "novel", "manga", "dataset", "corpus"
+    ])
+
+
+@dataclass
 class DiscoveryConfig:
     interval_minutes: int = 60
     firehose_enabled: bool = True
@@ -58,6 +82,7 @@ class DiscoveryConfig:
     github_recent: GithubRecentConfig = field(default_factory=GithubRecentConfig)
     registries: RegistriesConfig = field(default_factory=RegistriesConfig)
     apk: ApkDiscoveryConfig = field(default_factory=ApkDiscoveryConfig)
+    intelligence: IntelligenceConfig = field(default_factory=IntelligenceConfig)
 
 
 @dataclass

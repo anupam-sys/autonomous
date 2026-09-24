@@ -69,3 +69,45 @@ def test_suggestions(db):
     assert db.add_suggestion("dork", "q1")
     assert not db.add_suggestion("dork", "q1")
     assert len(db.suggestions(kind="dork", status="pending")) == 1
+
+
+def test_priority_claim_ordering(db):
+    t_low = Target(kind=TargetKind.REPO, source="t", locator="https://x/low.git",
+                   name="org/low-priority", priority=0.2)
+    t_high = Target(kind=TargetKind.REPO, source="t", locator="https://x/high.git",
+                    name="org/high-priority", priority=0.9)
+    db.upsert_target(t_low)
+    db.upsert_target(t_high)
+
+    claimed = db.claim_targets(1)
+    assert len(claimed) == 1
+    assert claimed[0]["name"] == "org/high-priority"  # claimed first due to higher priority
+
+
+def test_prune_and_rescore_targets(db):
+    from src.discovery.intelligence import TargetEvaluation
+
+    t_spam = Target(kind=TargetKind.REPO, source="t", locator="https://x/spam.git",
+                    name="bot/repo-1234567")
+    t_good = Target(kind=TargetKind.REPO, source="t", locator="https://x/good.git",
+                    name="org/api-service")
+    db.upsert_target(t_spam)
+    db.upsert_target(t_good)
+
+    def mock_eval(t):
+        if "repo-" in t.name:
+            return TargetEvaluation(keep=False, score=0.0, reason="bot spam")
+        return TargetEvaluation(keep=True, score=0.85, reason="good target")
+
+    res = db.prune_and_rescore_targets(mock_eval)
+    assert res["skipped"] == 1
+    assert res["rescored"] == 1
+
+    # Check status of spam target is skipped
+    row = db._conn.execute("SELECT status, error FROM targets WHERE name='bot/repo-1234567'").fetchone()
+    assert row["status"] == "skipped"
+    assert "bot spam" in row["error"]
+
+    # Check good target priority was updated
+    row = db._conn.execute("SELECT priority FROM targets WHERE name='org/api-service'").fetchone()
+    assert row["priority"] == 0.85

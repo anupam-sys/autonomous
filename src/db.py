@@ -15,7 +15,7 @@ import threading
 from datetime import date
 from pathlib import Path
 
-from .models import Artifact, Finding, Target
+from .models import Artifact, Finding, Target, TargetKind
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS targets (
@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS targets (
     version     TEXT NOT NULL DEFAULT '',
     dedup_key   TEXT NOT NULL UNIQUE,
     status      TEXT NOT NULL DEFAULT 'pending',
+    priority    REAL NOT NULL DEFAULT 0.0,
     first_seen  TEXT NOT NULL DEFAULT (datetime('now')),
     last_seen   TEXT NOT NULL DEFAULT (datetime('now')),
     error       TEXT
@@ -125,6 +126,10 @@ class Database:
         cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(findings)")}
         if "secret_enc" not in cols:
             self._conn.execute("ALTER TABLE findings ADD COLUMN secret_enc BLOB")
+        tcols = {r["name"] for r in self._conn.execute("PRAGMA table_info(targets)")}
+        if "priority" not in tcols:
+            self._conn.execute("ALTER TABLE targets ADD COLUMN priority REAL NOT NULL DEFAULT 0.0")
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_targets_priority ON targets(status, priority DESC)")
 
     def close(self) -> None:
         with self._lock:
@@ -134,20 +139,23 @@ class Database:
 
     def upsert_target(self, t: Target) -> tuple[int, bool]:
         """Insert a new target or touch last_seen. Returns (target_id, is_new)."""
+        prio = float(getattr(t, "priority", 0.0) or 0.0)
         with self._lock, self._conn:
             row = self._conn.execute(
-                "SELECT id FROM targets WHERE dedup_key = ?", (t.dedup_key,)
+                "SELECT id, priority FROM targets WHERE dedup_key = ?", (t.dedup_key,)
             ).fetchone()
             if row:
+                existing_prio = float(row["priority"] or 0.0)
+                new_prio = max(existing_prio, prio)
                 self._conn.execute(
-                    "UPDATE targets SET last_seen = datetime('now') WHERE id = ?",
-                    (row["id"],),
+                    "UPDATE targets SET last_seen = datetime('now'), priority = ? WHERE id = ?",
+                    (new_prio, row["id"]),
                 )
                 return row["id"], False
             cur = self._conn.execute(
-                """INSERT INTO targets (kind, source, locator, name, version, dedup_key, status)
-                   VALUES (?, ?, ?, ?, ?, ?, 'pending')""",
-                (t.kind.value, t.source, t.locator, t.name, t.version, t.dedup_key),
+                """INSERT INTO targets (kind, source, locator, name, version, dedup_key, status, priority)
+                   VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)""",
+                (t.kind.value, t.source, t.locator, t.name, t.version, t.dedup_key, prio),
             )
             return cur.lastrowid, True
 
@@ -158,7 +166,7 @@ class Database:
                 """UPDATE targets SET status = 'claimed'
                    WHERE id IN (
                        SELECT id FROM targets WHERE status = ?
-                       ORDER BY id LIMIT ?
+                       ORDER BY priority DESC, id ASC LIMIT ?
                    )
                    RETURNING *""",
                 (status, limit),
@@ -181,6 +189,39 @@ class Database:
                 "UPDATE targets SET status = 'pending' WHERE status = 'claimed'"
             )
             return cur.rowcount
+
+    def prune_and_rescore_targets(self, eval_fn) -> dict[str, int]:
+        """Evaluate pending targets: skip spam/noise, update priorities for high-value targets."""
+        with self._lock, self._conn:
+            rows = self._conn.execute(
+                "SELECT id, kind, source, locator, name, version, priority FROM targets WHERE status = 'pending'"
+            ).fetchall()
+            skipped = 0
+            rescored = 0
+            for r in rows:
+                t = Target(
+                    id=r["id"],
+                    kind=TargetKind(r["kind"]),
+                    source=r["source"],
+                    locator=r["locator"],
+                    name=r["name"],
+                    version=r["version"],
+                    priority=float(r["priority"] or 0.0),
+                )
+                ev = eval_fn(t)
+                if not ev.keep:
+                    self._conn.execute(
+                        "UPDATE targets SET status = 'skipped', error = ? WHERE id = ?",
+                        (f"intelligence: {ev.reason}", r["id"]),
+                    )
+                    skipped += 1
+                elif ev.score != float(r["priority"] or 0.0):
+                    self._conn.execute(
+                        "UPDATE targets SET priority = ? WHERE id = ?",
+                        (ev.score, r["id"]),
+                    )
+                    rescored += 1
+            return {"total": len(rows), "skipped": skipped, "rescored": rescored}
 
     # ---------------- artifacts ----------------
 

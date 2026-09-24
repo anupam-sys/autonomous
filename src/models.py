@@ -45,6 +45,7 @@ class Target:
     name: str          # human-readable: "owner/repo", package name, app id
     version: str = ""  # versionCode / package version / commit sha if known
     id: int | None = None
+    priority: float = 0.0
 
     @property
     def dedup_key(self) -> str:

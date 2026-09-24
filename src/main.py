@@ -137,6 +137,15 @@ def cmd_run(cfg: Config, once: bool) -> None:
     recovered = db.requeue_claimed()
     if recovered:
         logger.warning("requeued %d target(s) left in 'claimed' state", recovered)
+
+    intel_cfg = getattr(cfg.discovery, "intelligence", None)
+    if intel_cfg and getattr(intel_cfg, "enabled", True):
+        from .discovery.intelligence import evaluate_target
+        res = db.prune_and_rescore_targets(lambda t: evaluate_target(t, cfg=intel_cfg))
+        if res["skipped"] > 0 or res["rescored"] > 0:
+            logger.info("intelligence queue optimization: %d spam/noise skipped, %d prioritized (of %d pending)",
+                        res["skipped"], res["rescored"], res["total"])
+
     ctx = Context(cfg, db, WorkQueue(db))
 
     if cfg.web.enabled:
@@ -218,6 +227,17 @@ def cmd_suggestions(cfg: Config, action: str, sid: int | None) -> None:
     db.close()
 
 
+def cmd_prune(cfg: Config) -> None:
+    """Filter out spam/noise targets from the queue and prioritize high-value targets."""
+    db = Database(cfg.paths.db_path)
+    from .discovery.intelligence import evaluate_target
+    intel_cfg = getattr(cfg.discovery, "intelligence", None)
+    res = db.prune_and_rescore_targets(lambda t: evaluate_target(t, cfg=intel_cfg))
+    logger.info("queue pruned: %d total inspected, %d spam/noise skipped, %d prioritized",
+                res["total"], res["skipped"], res["rescored"])
+    db.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="fas",
@@ -229,6 +249,7 @@ def main() -> None:
     run_p = sub.add_parser("run", help="run the pipeline")
     run_p.add_argument("--once", action="store_true", help="single pass, then exit")
     sub.add_parser("stats", help="print queue / findings statistics")
+    sub.add_parser("prune", help="clean spam/noise from queue and prioritize targets")
     sub.add_parser("report", help="generate JSON+HTML report now")
     sub.add_parser("web", help="run the transparency dashboard (standalone)")
     rev_p = sub.add_parser("reveal", help="print a finding with its full secret value")
@@ -245,6 +266,8 @@ def main() -> None:
         cmd_init(cfg)
     elif args.command == "stats":
         cmd_stats(cfg)
+    elif args.command == "prune":
+        cmd_prune(cfg)
     elif args.command == "run":
         cmd_run(cfg, once=args.once)
     elif args.command == "report":

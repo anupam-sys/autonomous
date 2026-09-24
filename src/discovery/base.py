@@ -21,6 +21,7 @@ def run_discovery(ctx) -> dict:
     from .github_firehose import FirehoseSource
     from .github_recent import GithubRecentSource
     from .gitlab_source import GitlabSource
+    from .intelligence import evaluate_target
     from .registry_source import DockerHubSource, NpmSource, PypiSource
 
     d = ctx.cfg.discovery
@@ -48,15 +49,29 @@ def run_discovery(ctx) -> dict:
     if d.apk.target_packages:
         sources.append(TargetListSource())
 
+    intel_cfg = getattr(d, "intelligence", None)
+    intel_enabled = getattr(intel_cfg, "enabled", True) if intel_cfg else True
+
     stats: dict[str, int] = {}
     emit(ctx, "discovery", f"discovery pass started ({len(sources)} sources)")
     for src in sources:
         try:
             emit(ctx, "discovery", f"searching source: {src.name} ...")
-            new = sum(1 for t in src.discover(ctx) if ctx.queue.enqueue(t))
+            new = 0
+            filtered = 0
+            for t in src.discover(ctx):
+                if intel_enabled:
+                    ev = evaluate_target(t, cfg=intel_cfg)
+                    if not ev.keep:
+                        filtered += 1
+                        logger.debug("intelligence filtered %s: %s", t.name, ev.reason)
+                        continue
+                    t.priority = ev.score
+                if ctx.queue.enqueue(t):
+                    new += 1
             stats[src.name] = new
-            logger.info("%-16s -> %d new targets", src.name, new)
-            emit(ctx, "discovery", f"{src.name} -> {new} new targets")
+            logger.info("%-16s -> %d new targets (filtered %d noise)", src.name, new, filtered)
+            emit(ctx, "discovery", f"{src.name} -> {new} new targets ({filtered} noise filtered)")
         except Exception:
             logger.exception("discovery source %s failed", src.name)
             emit(ctx, "discovery", f"source {src.name} FAILED", level="error")

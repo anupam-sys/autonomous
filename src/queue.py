@@ -50,6 +50,7 @@ class WorkQueue:
 
     @staticmethod
     def _row_to_target(row: sqlite3.Row) -> Target:
+        keys = row.keys()
         return Target(
             id=row["id"],
             kind=TargetKind(row["kind"]),
@@ -57,4 +58,5 @@ class WorkQueue:
             locator=row["locator"],
             name=row["name"],
             version=row["version"],
+            priority=row["priority"] if "priority" in keys else 0.0,
         )

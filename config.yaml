@@ -39,6 +39,15 @@ discovery:
     apkmirror_recent: true
     apkpure_recent: false
     target_packages: []         # e.g. ["com.example.app"] — always fetched
+  intelligence:
+    enabled: true               # smart target evaluation & noise/spam filtering
+    min_relevance_score: 0.25   # drop targets below this threshold (0.0 to 1.0)
+    filter_spam: true           # filter bot-generated repos (repo-xxxxxx) & random hashes
+    filter_forks: true          # skip forks (duplicate code, no new secrets)
+    filter_noise_types: true    # skip leetcode, homework, wallpapers, icon packs, docs
+    filter_system_apks: true    # skip OEM bloatware & system firmware APKs
+    smart_git_filter: true      # blobless clone: skip files > max_file_kb during clone
+    selective_extract: true     # package extraction: skip images, binaries, docs
 
 # --- Stage 2/3 external tools (install via scripts/install_tools.py) ---
 tools:

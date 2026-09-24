@@ -19,6 +19,7 @@ from .downloader import BudgetExceeded, FileTooLarge
 from .package_fetcher import PackageFailed, fetch_package
 from .repo_cloner import CloneFailed, clone_repo
 from ..decompile.apk_decompiler import DecompileFailed, decompile_apk
+from ..discovery.intelligence import evaluate_target
 
 logger = get_logger("acquire")
 
@@ -29,7 +30,20 @@ _SKIP = (BudgetExceeded, FileTooLarge, ApkResolveFailed, CloneFailed,
 def run_acquire(ctx) -> dict:
     stats = {"acquired": 0, "skipped": 0, "failed": 0}
     batch = max(1, ctx.cfg.limits.workers) * 2
+    intel_cfg = getattr(ctx.cfg.discovery, "intelligence", None)
+    intel_enabled = getattr(intel_cfg, "enabled", True) if intel_cfg else True
+
     for target in ctx.queue.claim(batch):
+        if intel_enabled:
+            ev = evaluate_target(target, cfg=intel_cfg)
+            if not ev.keep:
+                ctx.queue.skip(target.id, f"intelligence: {ev.reason}")
+                stats["skipped"] += 1
+                logger.info("skipped %s (intelligence): %s", target.name, ev.reason)
+                emit(ctx, "acquire", f"skipped {target.name}: {ev.reason}",
+                     target.name, level="warn")
+                continue
+
         emit(ctx, "acquire",
              f"downloading {target.kind.value}: {target.name} <- {target.locator}",
              target.name)

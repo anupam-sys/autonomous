@@ -21,6 +21,39 @@ logger = get_logger("acquire.package")
 
 EXTRACT_CAP = 500 * 1_000_000  # 500MB extracted-size guard
 
+_SKIP_EXTENSIONS = {
+    # Binaries, libraries, bytecode
+    ".pyc", ".pyo", ".pyd", ".so", ".dylib", ".dll", ".exe", ".bin",
+    ".whl", ".egg", ".class", ".jar", ".war", ".ear", ".o", ".a",
+    # Images & media
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".svg", ".bmp",
+    ".mp3", ".mp4", ".wav", ".ogg", ".avi", ".mkv", ".mov", ".flv",
+    # Fonts
+    ".ttf", ".otf", ".woff", ".woff2", ".eot",
+    # Archives & documents
+    ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".pdf", ".epub",
+    # Source maps & cache
+    ".map", ".ds_store",
+}
+
+_SKIP_DIR_PARTS = {
+    "node_modules", "site-packages", "__pycache__", ".git",
+    "docs", "doc", "man", "locale", "locales",
+}
+
+
+def is_scannable_member(name: str, size: int, max_file_kb: int = 2048) -> bool:
+    """Return True if archive member is relevant for secret scanning."""
+    p = Path(name)
+    parts = set(p.parts)
+    if _SKIP_DIR_PARTS & parts:
+        return False
+    if size > max_file_kb * 1024:
+        return False
+    if p.suffix.lower() in _SKIP_EXTENSIONS:
+        return False
+    return True
+
 
 class PackageFailed(Exception):
     pass
@@ -42,17 +75,35 @@ def _fetch_archive(ctx, target: Target, dest_dir: Path) -> tuple[Path, str, int]
 
     extract_dir = dest_dir / "extracted"
     extract_dir.mkdir(exist_ok=True)
+
+    intel_cfg = getattr(ctx.cfg.discovery, "intelligence", None)
+    selective = getattr(intel_cfg, "selective_extract", True) if intel_cfg else True
+    max_file_kb = getattr(ctx.cfg.scan, "max_file_kb", 2048)
+
     try:
         if tarfile.is_tarfile(blob):
             with tarfile.open(blob) as tf:
-                _guard_members(tf.getmembers())
-                tf.extractall(extract_dir, filter="data")
+                members = tf.getmembers()
+                _guard_members(members)
+                if selective:
+                    members = [
+                        m for m in members
+                        if m.isdir() or is_scannable_member(m.name, m.size, max_file_kb)
+                    ]
+                tf.extractall(extract_dir, members=members, filter="data")
         elif zipfile.is_zipfile(blob):
             with zipfile.ZipFile(blob) as zf:
                 total = sum(i.file_size for i in zf.infolist())
                 if total > EXTRACT_CAP:
                     raise PackageFailed(f"zip expands to {total // 1_000_000}MB (bomb guard)")
-                zf.extractall(extract_dir)
+                members = zf.infolist()
+                if selective:
+                    members = [
+                        m for m in members
+                        if m.is_dir() or is_scannable_member(m.filename, m.file_size, max_file_kb)
+                    ]
+                for m in members:
+                    zf.extract(m, extract_dir)
         else:
             raise PackageFailed("unknown archive format")
     finally:

@@ -43,8 +43,18 @@ def clone_repo(ctx, target: Target, dest: Path) -> tuple[Path, int]:
     # clone or nothing. Prevents the "Connect to GitHub" GUI popup on 404s.
     cmd = ["git", "-c", "core.longpaths=true", "-c", "credential.helper=",
            "clone", "--quiet"]
+
+    intel_cfg = getattr(ctx.cfg.discovery, "intelligence", None)
+    use_filter = (
+        not full_history
+        and getattr(intel_cfg, "smart_git_filter", True)
+    )
+    filter_arg = f"--filter=blob:limit={ctx.cfg.scan.max_file_kb}k"
+
     if not full_history:
-        cmd += ["--depth", "1", "--single-branch"]
+        cmd += ["--depth", "1", "--single-branch", "--no-tags"]
+        if use_filter:
+            cmd += [filter_arg]
     cmd += [target.locator, str(dest)]
 
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "true",
@@ -62,9 +72,30 @@ def clone_repo(ctx, target: Target, dest: Path) -> tuple[Path, int]:
         force_rmtree(dest)
         raise CloneFailed(f"clone timed out after {CLONE_TIMEOUT_S}s") from exc
     except subprocess.CalledProcessError as exc:
-        force_rmtree(dest)
-        tail = (exc.stderr or b"")[-200:].decode(errors="replace")
-        raise CloneFailed(f"git clone failed: {tail}") from exc
+        if use_filter:
+            # Fall back to standard shallow clone if server rejected the blob filter
+            force_rmtree(dest)
+            fallback_cmd = [c for c in cmd if not c.startswith("--filter=")]
+            try:
+                subprocess.run(
+                    fallback_cmd,
+                    check=True,
+                    timeout=CLONE_TIMEOUT_S,
+                    env=env,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                )
+            except subprocess.CalledProcessError as exc2:
+                force_rmtree(dest)
+                tail = (exc2.stderr or b"")[-200:].decode(errors="replace")
+                raise CloneFailed(f"git clone failed: {tail}") from exc2
+            except subprocess.TimeoutExpired as exc2:
+                force_rmtree(dest)
+                raise CloneFailed(f"clone timed out after {CLONE_TIMEOUT_S}s") from exc2
+        else:
+            force_rmtree(dest)
+            tail = (exc.stderr or b"")[-200:].decode(errors="replace")
+            raise CloneFailed(f"git clone failed: {tail}") from exc
 
     size = _dir_size(dest)
     cap = ctx.cfg.limits.max_repo_mb * 1_000_000

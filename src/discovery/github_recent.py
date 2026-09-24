@@ -12,11 +12,21 @@ from typing import Iterable
 from ..http_utils import PoliteSession, HttpError
 from ..log import get_logger
 from ..models import Target, TargetKind
+from .intelligence import evaluate_target
 
 logger = get_logger("discovery.github_recent")
 
 SEARCH_REPOS = "https://api.github.com/search/repositories"
 SEARCH_CODE = "https://api.github.com/search/code"
+
+INTELLIGENT_QUERIES = [
+    'created:>{since} (api OR backend OR microservice OR "docker-compose")',
+    'created:>{since} (fastapi OR express OR django OR "spring-boot" OR "nextjs")',
+    'created:>{since} (terraform OR kubernetes OR pulumi OR serverless OR cloud)',
+    'created:>{since} (bot OR webhook OR "telegram-bot" OR "discord-bot" OR integration)',
+    'created:>{since} (stripe OR twilio OR openai OR supabase OR firebase)',
+    'created:>{since} ("credentials" OR "config.json" OR ".env.example" OR "settings.py")',
+]
 
 SEED_DORKS = [
     '"-----BEGIN RSA PRIVATE KEY"',
@@ -48,8 +58,19 @@ class GithubRecentSource:
 
     def _recent_repos(self, ctx, http, headers, per_page) -> Iterable[Target]:
         since = (date.today() - timedelta(days=7)).isoformat()
+        intel_cfg = getattr(ctx.cfg.discovery, "intelligence", None)
+        intel_enabled = getattr(intel_cfg, "enabled", True) if intel_cfg else True
+
+        if intel_enabled:
+            q_idx = int(ctx.db.get_kv("github_recent_q_idx") or 0)
+            template = INTELLIGENT_QUERIES[q_idx % len(INTELLIGENT_QUERIES)]
+            query = template.format(since=since)
+            ctx.db.set_kv("github_recent_q_idx", str(q_idx + 1))
+        else:
+            query = f"created:>{since}"
+
         params = {
-            "q": f"created:>{since}",
+            "q": query,
             "sort": "updated",
             "order": "desc",
             "per_page": per_page,
@@ -59,13 +80,36 @@ class GithubRecentSource:
         except HttpError as exc:
             logger.warning("recent-repo search failed: %s", exc)
             return
+
         for item in resp.json().get("items", []):
-            yield Target(
+            name = item.get("full_name")
+            clone_url = item.get("clone_url")
+            if not name or not clone_url:
+                continue
+
+            target = Target(
                 kind=TargetKind.REPO,
                 source=self.name,
-                locator=item["clone_url"],
-                name=item["full_name"],
+                locator=clone_url,
+                name=name,
             )
+
+            if intel_enabled:
+                meta = {
+                    "description": item.get("description") or "",
+                    "topics": item.get("topics") or [],
+                    "language": item.get("language") or "",
+                    "fork": item.get("fork", False),
+                    "size": item.get("size", 0),
+                    "archived": item.get("archived", False),
+                }
+                ev = evaluate_target(target, metadata=meta, cfg=intel_cfg)
+                if not ev.keep:
+                    logger.debug("skipping recent repo %s: %s", name, ev.reason)
+                    continue
+                target.priority = ev.score
+
+            yield target
 
     def _dork_search(self, ctx, http, headers, per_page) -> Iterable[Target]:
         dorks = list(SEED_DORKS)
