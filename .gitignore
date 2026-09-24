@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+config.local.yaml
+data/
+reports/
+logs/
+*.db
+*.db-wal
+*.db-shm

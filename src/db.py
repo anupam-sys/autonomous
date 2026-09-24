@@ -1,0 +1,474 @@
+"""SQLite persistence layer: schema + data-access methods.
+
+Dedup guarantees:
+  * targets   — unique on sha256(kind|locator|version): re-discovery is a no-op,
+                but a NEW version of the same app/package yields a new target.
+  * artifacts — sha256 content hash lets callers skip identical binaries.
+  * findings  — unique on (secret_hash, target_id, file_path, line): re-scans
+                update last_seen instead of duplicating rows.
+"""
+from __future__ import annotations
+
+import json
+import sqlite3
+import threading
+from datetime import date
+from pathlib import Path
+
+from .models import Artifact, Finding, Target
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS targets (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind        TEXT NOT NULL,
+    source      TEXT NOT NULL,
+    locator     TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    version     TEXT NOT NULL DEFAULT '',
+    dedup_key   TEXT NOT NULL UNIQUE,
+    status      TEXT NOT NULL DEFAULT 'pending',
+    first_seen  TEXT NOT NULL DEFAULT (datetime('now')),
+    last_seen   TEXT NOT NULL DEFAULT (datetime('now')),
+    error       TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_targets_status ON targets(status);
+
+CREATE TABLE IF NOT EXISTS artifacts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    target_id   INTEGER NOT NULL REFERENCES targets(id),
+    path        TEXT NOT NULL,
+    sha256      TEXT NOT NULL,
+    size_bytes  INTEGER NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_artifacts_target ON artifacts(target_id);
+CREATE INDEX IF NOT EXISTS idx_artifacts_sha ON artifacts(sha256);
+
+CREATE TABLE IF NOT EXISTS findings (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    target_id       INTEGER NOT NULL REFERENCES targets(id),
+    detector        TEXT NOT NULL,
+    service         TEXT NOT NULL,
+    secret_type     TEXT NOT NULL,
+    file_path       TEXT NOT NULL,
+    line            INTEGER NOT NULL,
+    secret_preview  TEXT NOT NULL,
+    secret_hash     TEXT NOT NULL,
+    secret_enc      BLOB,               -- full value, Fernet-encrypted (nullable)
+    context         TEXT NOT NULL,
+    severity        TEXT NOT NULL,
+    confidence      REAL NOT NULL,
+    triage_status   TEXT NOT NULL DEFAULT 'pending',
+    triage_notes    TEXT,
+    first_seen      TEXT NOT NULL DEFAULT (datetime('now')),
+    last_seen       TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(secret_hash, target_id, file_path, line)
+);
+CREATE INDEX IF NOT EXISTS idx_findings_target ON findings(target_id);
+CREATE INDEX IF NOT EXISTS idx_findings_service ON findings(service);
+CREATE INDEX IF NOT EXISTS idx_findings_triage ON findings(triage_status);
+
+CREATE TABLE IF NOT EXISTS llm_suggestions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind        TEXT NOT NULL,          -- dork | app | source
+    value       TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'pending',  -- pending | approved | rejected
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(kind, value)
+);
+
+CREATE TABLE IF NOT EXISTS runs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    stage       TEXT NOT NULL,
+    started_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    finished_at TEXT,
+    stats       TEXT
+);
+
+CREATE TABLE IF NOT EXISTS bandwidth (
+    day         TEXT PRIMARY KEY,
+    bytes_used  INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS kv (
+    key         TEXT PRIMARY KEY,
+    value       TEXT
+);
+
+CREATE TABLE IF NOT EXISTS activity (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          TEXT NOT NULL DEFAULT (datetime('now')),
+    stage       TEXT NOT NULL,
+    level       TEXT NOT NULL DEFAULT 'info',
+    message     TEXT NOT NULL,
+    target      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_activity_id ON activity(id);
+"""
+
+
+class Database:
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA foreign_keys=ON")
+        self._lock = threading.Lock()
+        with self._lock, self._conn:
+            self._conn.executescript(SCHEMA)
+            self._migrate()
+
+    def _migrate(self) -> None:
+        """Add columns introduced after the initial schema."""
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(findings)")}
+        if "secret_enc" not in cols:
+            self._conn.execute("ALTER TABLE findings ADD COLUMN secret_enc BLOB")
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
+    # ---------------- targets ----------------
+
+    def upsert_target(self, t: Target) -> tuple[int, bool]:
+        """Insert a new target or touch last_seen. Returns (target_id, is_new)."""
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT id FROM targets WHERE dedup_key = ?", (t.dedup_key,)
+            ).fetchone()
+            if row:
+                self._conn.execute(
+                    "UPDATE targets SET last_seen = datetime('now') WHERE id = ?",
+                    (row["id"],),
+                )
+                return row["id"], False
+            cur = self._conn.execute(
+                """INSERT INTO targets (kind, source, locator, name, version, dedup_key, status)
+                   VALUES (?, ?, ?, ?, ?, ?, 'pending')""",
+                (t.kind.value, t.source, t.locator, t.name, t.version, t.dedup_key),
+            )
+            return cur.lastrowid, True
+
+    def claim_targets(self, limit: int, status: str = "pending") -> list[sqlite3.Row]:
+        """Atomically move targets of a given status to 'claimed' and return them."""
+        with self._lock, self._conn:
+            return self._conn.execute(
+                """UPDATE targets SET status = 'claimed'
+                   WHERE id IN (
+                       SELECT id FROM targets WHERE status = ?
+                       ORDER BY id LIMIT ?
+                   )
+                   RETURNING *""",
+                (status, limit),
+            ).fetchall()
+
+    def set_target_status(
+        self, target_id: int, status: str, error: str | None = None
+    ) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE targets SET status = ?, error = ?, "
+                "last_seen = datetime('now') WHERE id = ?",
+                (status, error, target_id),
+            )
+
+    def requeue_claimed(self) -> int:
+        """Crash recovery: claimed-but-never-finished targets go back to pending."""
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "UPDATE targets SET status = 'pending' WHERE status = 'claimed'"
+            )
+            return cur.rowcount
+
+    # ---------------- artifacts ----------------
+
+    def insert_artifact(self, a: Artifact) -> int:
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                """INSERT INTO artifacts (target_id, path, sha256, size_bytes)
+                   VALUES (?, ?, ?, ?)""",
+                (a.target_id, a.path, a.sha256, a.size_bytes),
+            )
+            return cur.lastrowid
+
+    def artifact_seen(self, sha256: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM artifacts WHERE sha256 = ? LIMIT 1", (sha256,)
+            ).fetchone()
+            return row is not None
+
+    def latest_artifact_path(self, target_id: int) -> str | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT path FROM artifacts WHERE target_id = ? ORDER BY id DESC LIMIT 1",
+                (target_id,),
+            ).fetchone()
+            return row["path"] if row else None
+
+    # ---------------- findings ----------------
+
+    def insert_finding(self, f: Finding) -> bool:
+        """Insert a finding; True if new, False if it was a duplicate.
+
+        The full secret value (f.secret_full) is stored ONLY Fernet-encrypted
+        in secret_enc — never in plaintext. Duplicates update last_seen and
+        backfill secret_enc if the existing row lacks it.
+        """
+        from . import crypto_vault
+
+        enc = crypto_vault.encrypt(f.secret_full) if f.secret_full else None
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                """INSERT OR IGNORE INTO findings
+                   (target_id, detector, service, secret_type, file_path, line,
+                    secret_preview, secret_hash, secret_enc, context, severity,
+                    confidence, triage_status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    f.target_id,
+                    f.detector,
+                    f.service,
+                    f.secret_type.value,
+                    f.file_path,
+                    f.line,
+                    f.secret_preview,
+                    f.secret_hash,
+                    enc,
+                    f.context,
+                    f.severity,
+                    f.confidence,
+                    f.triage_status.value,
+                ),
+            )
+            if cur.rowcount == 0:
+                self._conn.execute(
+                    """UPDATE findings SET last_seen = datetime('now'),
+                         secret_enc = COALESCE(secret_enc, ?)
+                       WHERE secret_hash = ? AND target_id = ?
+                         AND file_path = ? AND line = ?""",
+                    (enc, f.secret_hash, f.target_id, f.file_path, f.line),
+                )
+                return False
+            return True
+
+    def get_finding_secret(self, finding_id: int) -> str | None:
+        """Decrypt and return the full secret value (or None if not stored)."""
+        from . import crypto_vault
+
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT secret_enc FROM findings WHERE id = ?", (finding_id,)
+            ).fetchone()
+        if not row or row["secret_enc"] is None:
+            return None
+        return crypto_vault.decrypt(row["secret_enc"])
+
+    def untriaged_findings(
+        self, min_confidence: float, limit: int
+    ) -> list[sqlite3.Row]:
+        with self._lock:
+            return self._conn.execute(
+                """SELECT f.*, t.name AS target_name, t.kind AS target_kind
+                   FROM findings f JOIN targets t ON t.id = f.target_id
+                   WHERE f.triage_status = 'pending' AND f.confidence >= ?
+                   ORDER BY f.confidence DESC, f.id LIMIT ?""",
+                (min_confidence, limit),
+            ).fetchall()
+
+    def set_finding_triage(
+        self,
+        finding_id: int,
+        status: str,
+        notes: str | None = None,
+        confidence: float | None = None,
+    ) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                """UPDATE findings
+                   SET triage_status = ?, triage_notes = ?,
+                       confidence = COALESCE(?, confidence)
+                   WHERE id = ?""",
+                (status, notes, confidence, finding_id),
+            )
+
+    def findings_for_report(self, min_severity_rank: int = 0) -> list[sqlite3.Row]:
+        with self._lock:
+            return self._conn.execute(
+                """SELECT f.*, t.name AS target_name, t.kind AS target_kind,
+                          t.locator AS target_locator, t.source AS target_source
+                   FROM findings f JOIN targets t ON t.id = f.target_id
+                   ORDER BY
+                     CASE f.severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1
+                                     WHEN 'medium' THEN 2 WHEN 'low' THEN 3
+                                     ELSE 4 END,
+                     f.confidence DESC"""
+            ).fetchall()
+
+    # ---------------- llm suggestions ----------------
+
+    def add_suggestion(self, kind: str, value: str, status: str = "pending") -> bool:
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO llm_suggestions (kind, value, status) "
+                "VALUES (?, ?, ?)",
+                (kind, value, status),
+            )
+            return cur.rowcount > 0
+
+    def suggestions(
+        self, kind: str | None = None, status: str | None = None
+    ) -> list[sqlite3.Row]:
+        sql = "SELECT * FROM llm_suggestions WHERE 1=1"
+        params: list = []
+        if kind:
+            sql += " AND kind = ?"
+            params.append(kind)
+        if status:
+            sql += " AND status = ?"
+            params.append(status)
+        with self._lock:
+            return self._conn.execute(sql, params).fetchall()
+
+    def set_suggestion_status(self, suggestion_id: int, status: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE llm_suggestions SET status = ? WHERE id = ?",
+                (status, suggestion_id),
+            )
+
+    # ---------------- runs ----------------
+
+    def start_run(self, stage: str) -> int:
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "INSERT INTO runs (stage) VALUES (?)", (stage,)
+            )
+            return cur.lastrowid
+
+    def finish_run(self, run_id: int, stats: dict) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE runs SET finished_at = datetime('now'), stats = ? WHERE id = ?",
+                (json.dumps(stats), run_id),
+            )
+
+    # ---------------- bandwidth ----------------
+
+    def add_bandwidth(self, nbytes: int) -> None:
+        if nbytes <= 0:
+            return
+        today = date.today().isoformat()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """INSERT INTO bandwidth (day, bytes_used) VALUES (?, ?)
+                   ON CONFLICT(day) DO UPDATE SET bytes_used = bytes_used + ?""",
+                (today, nbytes, nbytes),
+            )
+
+    def bandwidth_today(self) -> int:
+        today = date.today().isoformat()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT bytes_used FROM bandwidth WHERE day = ?", (today,)
+            ).fetchone()
+            return row["bytes_used"] if row else 0
+
+    def detector_counts(self) -> dict:
+        with self._lock:
+            return {
+                r["detector"]: r["n"]
+                for r in self._conn.execute(
+                    "SELECT detector, COUNT(*) AS n FROM findings GROUP BY detector"
+                )
+            }
+
+    def severity_counts(self) -> dict:
+        with self._lock:
+            return {
+                r["severity"]: r["n"]
+                for r in self._conn.execute(
+                    "SELECT severity, COUNT(*) AS n FROM findings GROUP BY severity"
+                )
+            }
+
+    # ---------------- activity feed ----------------
+
+    def add_activity(
+        self, stage: str, message: str, target: str | None = None, level: str = "info"
+    ) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO activity (stage, level, message, target) VALUES (?, ?, ?, ?)",
+                (stage, level, message, target),
+            )
+            # keep the table bounded (last ~5000 events)
+            self._conn.execute(
+                "DELETE FROM activity WHERE id < "
+                "(SELECT COALESCE(MAX(id), 0) - 5000 FROM activity)"
+            )
+
+    def activity_since(self, after_id: int, limit: int = 300) -> list[sqlite3.Row]:
+        with self._lock:
+            return self._conn.execute(
+                "SELECT * FROM activity WHERE id > ? ORDER BY id ASC LIMIT ?",
+                (after_id, limit),
+            ).fetchall()
+
+    def activity_latest(self, limit: int = 1) -> list[sqlite3.Row]:
+        with self._lock:
+            return self._conn.execute(
+                "SELECT * FROM activity ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+
+    def recent_runs(self, limit: int = 50) -> list[sqlite3.Row]:
+        with self._lock:
+            return self._conn.execute(
+                "SELECT * FROM runs ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+
+    # ---------------- kv (source state) ----------------
+
+    def get_kv(self, key: str) -> str | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM kv WHERE key = ?", (key,)
+            ).fetchone()
+            return row["value"] if row else None
+
+    def set_kv(self, key: str, value: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO kv (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = ?",
+                (key, value, value),
+            )
+
+    # ---------------- stats ----------------
+
+    def counts(self) -> dict:
+        with self._lock:
+            targets = {
+                r["status"]: r["n"]
+                for r in self._conn.execute(
+                    "SELECT status, COUNT(*) AS n FROM targets GROUP BY status"
+                )
+            }
+            findings = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM findings"
+            ).fetchone()["n"]
+            pending_triage = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM findings WHERE triage_status = 'pending'"
+            ).fetchone()["n"]
+            suggestions = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM llm_suggestions WHERE status = 'pending'"
+            ).fetchone()["n"]
+        return {
+            "targets_by_status": targets,
+            "findings_total": findings,
+            "findings_pending_triage": pending_triage,
+            "suggestions_pending": suggestions,
+            "bandwidth_today_mb": round(self.bandwidth_today() / 1e6, 1),
+        }

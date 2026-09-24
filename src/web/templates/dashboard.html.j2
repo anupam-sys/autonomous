@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FAS — pipeline transparency</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --border:#30363d; --fg:#e6edf3;
+          --dim:#8b949e; --accent:#58a6ff; --gold:#e3b341; --red:#f85149;
+          --green:#3fb950; --orange:#d29922; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:14px/1.45 system-ui,-apple-system,sans-serif; }
+  header { display:flex; align-items:center; gap:14px; padding:12px 20px;
+           background:var(--panel); border-bottom:1px solid var(--border);
+           position:sticky; top:0; z-index:10; }
+  header h1 { font-size:16px; margin:0; letter-spacing:.5px; }
+  .dot { width:10px; height:10px; border-radius:50%; background:var(--dim); }
+  .dot.live { background:var(--green); animation:pulse 1.5s infinite; }
+  @keyframes pulse { 50% { opacity:.35; } }
+  .meta { color:var(--dim); font-size:12px; }
+  #now { margin:16px 20px; padding:14px 18px; background:var(--panel);
+         border:1px solid var(--border); border-left:4px solid var(--accent);
+         border-radius:6px; font-family:ui-monospace,Consolas,monospace; }
+  #now .stage { color:var(--accent); font-weight:700; text-transform:uppercase;
+                font-size:11px; letter-spacing:1px; }
+  #now .msg { font-size:15px; margin-top:4px; word-break:break-all; }
+  #now .ts { color:var(--dim); font-size:11px; margin-top:4px; }
+  #funnel { display:flex; gap:10px; margin:0 20px 16px; flex-wrap:wrap; }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:6px;
+          padding:10px 16px; min-width:110px; flex:1; }
+  .card .n { font-size:22px; font-weight:700; }
+  .card .l { color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.5px; }
+  .card.gold .n { color:var(--gold); } .card.red .n { color:var(--red); }
+  .card.green .n { color:var(--green); } .card.accent .n { color:var(--accent); }
+  nav.tabs { display:flex; gap:4px; margin:0 20px; border-bottom:1px solid var(--border); }
+  nav.tabs button { background:none; border:none; color:var(--dim); padding:8px 16px;
+                    cursor:pointer; font-size:13px; border-bottom:2px solid transparent; }
+  nav.tabs button.active { color:var(--fg); border-bottom-color:var(--accent); }
+  .pane { padding:16px 20px 40px; display:none; }
+  .pane.active { display:block; }
+  /* activity feed */
+  #feed { font-family:ui-monospace,Consolas,monospace; font-size:12.5px; }
+  .ev { padding:5px 8px; border-bottom:1px solid #21262d; display:flex; gap:10px;
+        animation:fade .3s; }
+  @keyframes fade { from { opacity:0; transform:translateY(-4px);} }
+  .ev .t { color:var(--dim); white-space:nowrap; }
+  .ev .s { color:var(--accent); min-width:90px; text-transform:uppercase;
+           font-size:10px; font-weight:700; padding-top:2px; }
+  .ev .m { word-break:break-all; }
+  .ev.finding { background:#2d2306; } .ev.finding .m { color:var(--gold); }
+  .ev.error .m { color:var(--red); } .ev.warn .m { color:var(--orange); }
+  /* findings table */
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  th,td { text-align:left; padding:7px 9px; border-bottom:1px solid var(--border);
+          vertical-align:top; }
+  th { color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.5px; }
+  .sev { font-weight:700; font-size:10px; text-transform:uppercase; padding:2px 7px;
+         border-radius:10px; }
+  .sev.critical { background:#f8514933; color:var(--red); }
+  .sev.high { background:#d2992233; color:var(--orange); }
+  .sev.medium { background:#e3b34133; color:var(--gold); }
+  .sev.low, .sev.info { background:#58a6ff22; color:var(--accent); }
+  code { background:#ffffff11; padding:1px 5px; border-radius:4px;
+         font-family:ui-monospace,Consolas,monospace; font-size:11.5px; }
+  pre { white-space:pre-wrap; word-break:break-all; max-width:520px; font-size:11px;
+        color:var(--dim); }
+  details summary { cursor:pointer; color:var(--accent); }
+  .pill { padding:2px 8px; border-radius:10px; font-size:10px; font-weight:700; }
+  .pill.true_positive { background:#3fb95033; color:var(--green); }
+  .pill.false_positive { background:#f8514933; color:var(--red); }
+  .pill.placeholder, .pill.pending { background:#8b949e33; color:var(--dim); }
+  .btn { background:var(--panel); border:1px solid var(--border); color:var(--fg);
+         border-radius:5px; padding:3px 10px; cursor:pointer; font-size:11px; }
+  .btn:hover { border-color:var(--accent); }
+  .statgrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:12px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="dot" id="dot"></div>
+  <h1>FAS — live transparency</h1>
+  <span class="meta" id="hdr-meta">connecting…</span>
+</header>
+
+<div id="now">
+  <div class="stage" id="now-stage">—</div>
+  <div class="msg" id="now-msg">waiting for first event…</div>
+  <div class="ts" id="now-ts"></div>
+</div>
+
+<div id="funnel">
+  <div class="card"><div class="n" id="c-pending">0</div><div class="l">pending</div></div>
+  <div class="card accent"><div class="n" id="c-claimed">0</div><div class="l">in flight</div></div>
+  <div class="card accent"><div class="n" id="c-acquired">0</div><div class="l">acquired</div></div>
+  <div class="card green"><div class="n" id="c-processed">0</div><div class="l">scanned</div></div>
+  <div class="card"><div class="n" id="c-skipped">0</div><div class="l">skipped</div></div>
+  <div class="card red"><div class="n" id="c-failed">0</div><div class="l">failed</div></div>
+  <div class="card gold"><div class="n" id="c-findings">0</div><div class="l">findings</div></div>
+  <div class="card"><div class="n" id="c-triage">0</div><div class="l">await triage</div></div>
+  <div class="card"><div class="n" id="c-bw">0</div><div class="l">MB today</div></div>
+</div>
+
+<nav class="tabs">
+  <button class="active" data-pane="activity">Activity</button>
+  <button data-pane="findings">Findings</button>
+  <button data-pane="sources">Sources &amp; runs</button>
+  <button data-pane="suggestions">AI suggestions</button>
+  <button data-pane="config">Config</button>
+</nav>
+
+<div class="pane active" id="pane-activity"><div id="feed"></div></div>
+
+<div class="pane" id="pane-findings">
+  <table><thead><tr>
+    <th>sev</th><th>service</th><th>detector</th><th>triage</th><th>target</th>
+    <th>location</th><th>preview</th><th>context</th>
+  </tr></thead><tbody id="findings-body"></tbody></table>
+</div>
+
+<div class="pane" id="pane-sources">
+  <div class="statgrid" id="detector-grid"></div>
+  <h3 style="margin-top:24px">recent stage runs</h3>
+  <table><thead><tr><th>id</th><th>stage</th><th>started (UTC)</th><th>finished</th><th>stats</th></tr></thead>
+  <tbody id="runs-body"></tbody></table>
+</div>
+
+<div class="pane" id="pane-suggestions">
+  <p class="meta">LLM-proposed discovery ideas. Approved dorks are picked up by the GitHub dork source automatically.</p>
+  <table><thead><tr><th>id</th><th>kind</th><th>status</th><th>value</th><th></th></tr></thead>
+  <tbody id="sug-body"></tbody></table>
+</div>
+
+<div class="pane" id="pane-config">
+  <p class="meta">
+    Saved to <code>config.local.yaml</code> (overrides <code>config.yaml</code>).
+    The daemon reloads config every pass — changes apply within one pass.
+    <b>web.*</b> (host/port/token) needs a daemon restart.
+    Secret fields are write-only: leave blank to keep the current value.
+  </p>
+  <div id="cfg-form"></div>
+  <div style="margin:16px 0">
+    <button class="btn" style="font-size:13px;padding:8px 18px" onclick="saveConfig()">save changes</button>
+    <span class="meta" id="cfg-status"></span>
+  </div>
+</div>
+
+<script>
+const TOKEN = {{ '"' + token + '"' if token else 'null' }};
+function url(path, params) {
+  const p = new URLSearchParams(params || {});
+  if (TOKEN) p.set('token', TOKEN);
+  const s = p.toString();
+  return path + (s ? '?' + s : '');
+}
+const esc = s => String(s ?? '').replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+let lastId = 0, firstFeed = true;
+
+async function pollState() {
+  try {
+    const d = await (await fetch(url('/api/state'))).json();
+    const c = d.counts.targets_by_status || {};
+    set('c-pending', c.pending||0); set('c-claimed', c.claimed||0);
+    set('c-acquired', c.acquired||0); set('c-processed', c.processed||0);
+    set('c-skipped', c.skipped||0); set('c-failed', c.failed||0);
+    set('c-findings', d.counts.findings_total||0);
+    set('c-triage', d.counts.findings_pending_triage||0);
+    set('c-bw', d.counts.bandwidth_today_mb||0);
+    if (d.now_ts) {
+      document.getElementById('now-stage').textContent = d.now_stage || '—';
+      document.getElementById('now-msg').textContent =
+        (d.now_target ? '[' + d.now_target + '] ' : '') + d.now_message;
+      document.getElementById('now-ts').textContent = d.now_ts + ' UTC';
+      const age = (Date.now() - Date.parse(d.now_ts.replace(' ', 'T') + 'Z')) / 1000;
+      document.getElementById('dot').className = 'dot' + (age < 90 ? ' live' : '');
+      document.getElementById('hdr-meta').textContent =
+        (age < 90 ? 'pipeline active' : 'idle ' + Math.round(age/60) + 'm') +
+        ' · refresh ' + new Date().toLocaleTimeString();
+      // NOTE: do NOT advance lastId here — pollEvents owns it, otherwise
+      // events between polls get skipped and the feed starves.
+    }
+  } catch (e) { document.getElementById('hdr-meta').textContent = 'connection error'; }
+}
+
+async function pollEvents() {
+  const evs = await (await fetch(url('/api/events', {since: lastId}))).json();
+  if (!evs.length) return;
+  const feed = document.getElementById('feed');
+  if (firstFeed) { feed.innerHTML = ''; firstFeed = false; }
+  for (const e of evs) {
+    lastId = Math.max(lastId, e.id);
+    const div = document.createElement('div');
+    div.className = 'ev ' + e.level;
+    div.innerHTML = `<span class="t">${esc(e.ts)}</span>` +
+      `<span class="s">${esc(e.stage)}</span><span class="m">` +
+      (e.target ? `[${esc(e.target)}] ` : '') + esc(e.message) + '</span>';
+    feed.prepend(div);
+  }
+  while (feed.children.length > 250) feed.lastChild.remove();
+}
+
+async function pollFindings() {
+  const rows = await (await fetch(url('/api/findings'))).json();
+  document.getElementById('findings-body').innerHTML = rows.map(f => `<tr>
+    <td><span class="sev ${esc(f.severity)}">${esc(f.severity)}</span></td>
+    <td>${esc(f.service)}</td><td>${esc(f.detector)}</td>
+    <td><span class="pill ${esc(f.triage_status)}">${esc(f.triage_status)}</span></td>
+    <td>${esc(f.target_name)}<br><small style="color:var(--dim)">${esc(f.target_kind)}</small></td>
+    <td><code>${esc(f.file_path)}:${f.line}</code></td>
+    <td><code id="prev-${f.id}">${esc(f.secret_preview)}</code>
+      <button class="btn" onclick="reveal(${f.id})">reveal</button></td>
+    <td><details><summary>view</summary><pre>${esc(f.context)}</pre></details></td>
+  </tr>`).join('');
+}
+
+async function pollRuns() {
+  const rows = await (await fetch(url('/api/runs'))).json();
+  document.getElementById('runs-body').innerHTML = rows.map(r =>
+    `<tr><td>${r.id}</td><td>${esc(r.stage)}</td><td>${esc(r.started_at)}</td>
+     <td>${esc(r.finished_at || '…')}</td>
+     <td><code>${esc(r.stats || '')}</code></td></tr>`).join('');
+  const st = await (await fetch(url('/api/state'))).json();
+  document.getElementById('detector-grid').innerHTML =
+    Object.entries(st.detectors || {}).map(([k, v]) =>
+      `<div class="card"><div class="n">${v}</div><div class="l">${esc(k)}</div></div>`).join('') ||
+    '<p class="meta">no findings yet</p>';
+}
+
+async function pollSuggestions() {
+  const rows = await (await fetch(url('/api/suggestions'))).json();
+  document.getElementById('sug-body').innerHTML = rows.map(s =>
+    `<tr><td>${s.id}</td><td>${esc(s.kind)}</td><td>${esc(s.status)}</td>
+     <td><code>${esc(s.value)}</code></td><td>
+     ${s.status === 'pending'
+       ? `<button class="btn" onclick="sug(${s.id},'approve')">approve</button>
+          <button class="btn" onclick="sug(${s.id},'reject')">reject</button>` : ''}
+     </td></tr>`).join('');
+}
+async function sug(id, action) {
+  await fetch(url(`/api/suggestions/${id}/${action}`), {method: 'POST'});
+  pollSuggestions();
+}
+async function reveal(id) {
+  const cell = document.getElementById('prev-' + id);
+  const r = await fetch(url(`/api/finding/${id}/reveal`), {method: 'POST'});
+  const d = await r.json();
+  cell.textContent = d.secret || ('(' + (d.error || 'unavailable') + ')');
+  cell.style.color = 'var(--gold)';
+}
+
+/* ---------------- config tab ---------------- */
+const CFG_SECTIONS = [
+  ['LLM — triage & AI discovery', [
+    ['llm.enabled', 'bool', 'enable LLM triage'],
+    ['llm.base_url', 'str', 'OpenAI-compatible base URL'],
+    ['llm.api_key', 'secret', 'API key'],
+    ['llm.model', 'str', 'model'],
+    ['llm.timeout_seconds', 'int', 'timeout (s)'],
+    ['llm.triage_confidence_floor', 'float', 'triage confidence floor'],
+    ['llm.max_findings_per_run', 'int', 'max LLM findings/run'],
+    ['llm.ai_discovery.enabled', 'bool', 'AI discovery enabled'],
+    ['llm.ai_discovery.allow_auto_dorks', 'bool', 'auto-activate LLM dorks'],
+    ['llm.ai_discovery.interval_hours', 'int', 'AI discovery interval (h)'],
+  ]],
+  ['Pipeline limits', [
+    ['limits.workers', 'int', 'acquire workers/pass'],
+    ['limits.jadx_concurrency', 'int', 'jadx concurrency'],
+    ['limits.max_apk_mb', 'int', 'max APK size (MB)'],
+    ['limits.max_repo_mb', 'int', 'max repo size (MB)'],
+    ['limits.daily_bandwidth_mb', 'int', 'daily bandwidth cap (MB)'],
+    ['limits.work_retention', 'choice:keep,on_finding,delete', 'work-file retention'],
+  ]],
+  ['Discovery sources', [
+    ['discovery.interval_minutes', 'int', 'discovery interval (min)'],
+    ['discovery.firehose_enabled', 'bool', 'GitHub firehose'],
+    ['discovery.github_recent.enabled', 'bool', 'GitHub recent/dorks'],
+    ['discovery.github_recent.token', 'secret', 'GitHub token'],
+    ['discovery.github_recent.per_page', 'int', 'GitHub results/page'],
+    ['discovery.gitlab_enabled', 'bool', 'GitLab'],
+    ['discovery.bitbucket_enabled', 'bool', 'Bitbucket'],
+    ['discovery.registries.npm', 'bool', 'npm feed'],
+    ['discovery.registries.pypi', 'bool', 'PyPI feed'],
+    ['discovery.registries.docker_hub', 'bool', 'Docker Hub'],
+    ['discovery.apk.fdroid', 'bool', 'F-Droid'],
+    ['discovery.apk.apkmirror_recent', 'bool', 'APKMirror recent'],
+    ['discovery.apk.apkpure_recent', 'bool', 'APKPure recent'],
+    ['discovery.apk.target_packages', 'list', 'APK target packages (one per line)'],
+  ]],
+  ['Scanning', [
+    ['scan.interval_minutes', 'int', 'work-loop tick (min)'],
+    ['scan.entropy_threshold', 'float', 'entropy threshold'],
+    ['scan.min_secret_length', 'int', 'min secret length'],
+    ['scan.context_lines', 'int', 'context lines'],
+    ['scan.max_file_kb', 'int', 'max file size (KB)'],
+    ['scan.gitleaks_enabled', 'bool', 'gitleaks git-history scan'],
+    ['scan.apk_decompile_mode', 'choice:always,on_hit,never', 'APK jadx mode'],
+  ]],
+  ['Reporting & web', [
+    ['report.interval_hours', 'int', 'report interval (h)'],
+    ['report.reveal_secrets', 'bool', 'store/show full values'],
+    ['report.disclosure_lookup', 'bool', 'security.txt lookup'],
+    ['web.host', 'str', 'web host (restart)'],
+    ['web.port', 'int', 'web port (restart)'],
+    ['web.token', 'secret', 'web token (restart)'],
+  ]],
+  ['Notifications', [
+    ['notifications.discord.enabled', 'bool', 'Discord enabled'],
+    ['notifications.discord.webhook_url', 'secret', 'Discord webhook URL'],
+    ['notifications.discord.notify_on', 'choice:any,high_severity,true_positive', 'notify on'],
+  ]],
+];
+const dirty = new Set();
+const dig = (o, p) => p.split('.').reduce((a, k) => (a && a[k] !== undefined) ? a[k] : undefined, o);
+
+async function loadConfig() {
+  const d = await (await fetch(url('/api/config'))).json();
+  const c = d.config, sset = d.secrets_set || {};
+  const form = document.getElementById('cfg-form');
+  form.innerHTML = CFG_SECTIONS.map(([title, fields]) => `
+    <h3 style="margin:18px 0 8px">${esc(title)}</h3>
+    <table><tbody>
+    ${fields.map(([p, t, label]) => {
+      const v = dig(c, p);
+      let input = '';
+      if (t === 'bool') {
+        input = `<input type="checkbox" data-path="${p}" ${v ? 'checked' : ''}>`;
+      } else if (t === 'secret') {
+        input = `<input type="password" data-path="${p}" data-secret="1" value=""
+                 placeholder="${sset[p] ? '•••••••• (set — blank keeps it)' : '(not set)'}"
+                 style="width:340px">`;
+      } else if (t === 'list') {
+        input = `<textarea data-path="${p}" rows="4" style="width:340px">${esc((v || []).join('\n'))}</textarea>`;
+      } else if (t.startsWith('choice:')) {
+        const opts = t.slice(7).split(',');
+        input = `<select data-path="${p}">` + opts.map(o =>
+          `<option value="${o}" ${o === v ? 'selected' : ''}>${o}</option>`).join('') + '</select>';
+      } else {
+        input = `<input type="${t === 'str' ? 'text' : 'number'}" data-path="${p}"
+                 ${t === 'float' ? 'step="any"' : ''} value="${esc(v ?? '')}" style="width:340px">`;
+      }
+      return `<tr><td style="width:280px">${esc(label)}<br>
+        <code style="color:var(--dim)">${p}</code></td><td>${input}</td></tr>`;
+    }).join('')}
+    </tbody></table>`).join('');
+  form.querySelectorAll('input,select,textarea').forEach(el =>
+    el.addEventListener('input', () => dirty.add(el.dataset.path)));
+}
+
+async function saveConfig() {
+  const updates = {};
+  document.querySelectorAll('#cfg-form [data-path]').forEach(el => {
+    const p = el.dataset.path, t = el.type;
+    if (el.dataset.secret && !el.value) return;          // blank secret = keep
+    if (t === 'checkbox') { if (dirty.has(p)) updates[p] = el.checked; return; }
+    if (el.tagName === 'TEXTAREA') { if (dirty.has(p)) updates[p] = el.value; return; }
+    if (dirty.has(p)) updates[p] = t === 'number' ? Number(el.value) : el.value;
+  });
+  const st = document.getElementById('cfg-status');
+  if (!Object.keys(updates).length) { st.textContent = ' — nothing changed'; return; }
+  const r = await fetch(url('/api/config'), {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({updates}),
+  });
+  const d = await r.json();
+  if (d.ok) {
+    dirty.clear();
+    st.textContent = ` — saved: ${d.applied.join(', ')} (effective next pass)`;
+    st.style.color = 'var(--green)';
+  } else {
+    st.textContent = ` — ${d.error}${d.fields ? ': ' + JSON.stringify(d.fields) : ''}`;
+    st.style.color = 'var(--red)';
+  }
+}
+
+document.querySelectorAll('nav.tabs button').forEach(b =>
+  b.addEventListener('click', () => {
+    document.querySelectorAll('nav.tabs button').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.pane').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    document.getElementById('pane-' + b.dataset.pane).classList.add('active');
+  }));
+
+function set(id, v) { document.getElementById(id).textContent = v; }
+
+pollState(); pollEvents(); pollFindings(); pollRuns(); pollSuggestions(); loadConfig();
+setInterval(pollState, 4000);
+setInterval(pollEvents, 2000);
+setInterval(pollFindings, 15000);
+setInterval(pollRuns, 30000);
+setInterval(pollSuggestions, 30000);
+</script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+.venv/
+venv/
+tools/
+data/
+reports/
+logs/
+*.db
+*.db-wal
+*.db-shm
+.env
+.git/
+__pycache__/
+*.pyc
+tests/

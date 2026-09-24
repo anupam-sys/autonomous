@@ -1,0 +1,25 @@
+services:
+  pipeline:
+    build: .
+    container_name: fas-pipeline
+    restart: unless-stopped
+    env_file:
+      - .env          # optional; LLM_API_KEY, GITHUB_TOKEN, ...
+    volumes:
+      - ./data:/app/data
+      - ./reports:/app/reports
+      - ./logs:/app/logs
+      - ./config.yaml:/app/config.yaml:ro
+      - ./config.local.yaml:/app/config.local.yaml   # rw: dashboard edits persist
+    ports:
+      - "127.0.0.1:8080:8080"   # dashboard; set web.host 0.0.0.0 + token to expose
+    deploy:
+      resources:
+        limits:
+          memory: 3G          # raise with limits.workers / jadx_concurrency
+          cpus: "2.0"
+    # useful one-shots:
+    #   docker compose run --rm pipeline run --once
+    #   docker compose run --rm pipeline stats
+    #   docker compose run --rm pipeline report
+    #   docker compose run --rm pipeline suggestions list

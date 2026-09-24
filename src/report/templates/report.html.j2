@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Exposure report {{ report.generated_at }}</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; color: #1a1a1a; }
+  h1 { font-size: 1.4rem; }
+  .meta { color: #666; margin-bottom: 1.5rem; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
+  th, td { border: 1px solid #ddd; padding: 6px 8px; text-align: left; vertical-align: top; }
+  th { background: #f4f4f4; position: sticky; top: 0; }
+  .critical { background: #ffd6d6; } .high { background: #ffe8cc; }
+  .medium { background: #fff9cc; }  .low { background: #eef; }
+  .sev { font-weight: 700; text-transform: uppercase; font-size: 0.75rem; }
+  code { background: #f0f0f0; padding: 1px 4px; border-radius: 3px; }
+  details summary { cursor: pointer; color: #555; }
+  pre { white-space: pre-wrap; word-break: break-all; max-width: 40rem; font-size: 0.75rem; }
+</style>
+</head>
+<body>
+<h1>Secret-exposure research report</h1>
+<div class="meta">
+  generated {{ report.generated_at }} &middot;
+  {{ report.findings|length }} findings &middot;
+  targets: {% for k, v in report.stats.targets_by_status.items() %}{{ k }}={{ v }} {% endfor %}
+</div>
+<table>
+  <thead>
+    <tr>
+      <th>Severity</th><th>Service</th><th>Detector</th><th>Triage</th>
+      <th>Target</th><th>Location</th><th>Preview</th><th>Disclosure contact</th><th>Context</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for f in report.findings %}
+    <tr class="{{ f.severity }}">
+      <td class="sev">{{ f.severity }}</td>
+      <td>{{ f.service }}</td>
+      <td>{{ f.detector }}</td>
+      <td>{{ f.triage_status }}{% if f.triage_notes %}<br><small>{{ f.triage_notes }}</small>{% endif %}</td>
+      <td>{{ f.target }}<br><small>{{ f.target_locator }}</small></td>
+      <td><code>{{ f.file }}:{{ f.line }}</code></td>
+      <td><code>{{ f.secret_preview }}</code></td>
+      <td>{% if f.disclosure_contact %}<a href="{{ f.disclosure_contact }}">{{ f.disclosure_contact }}</a>{% else %}—{% endif %}</td>
+      <td><details><summary>view</summary><pre>{{ f.context }}</pre></details></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</body>
+</html>
