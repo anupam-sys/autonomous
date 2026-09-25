@@ -74,6 +74,22 @@ class IntelligenceConfig:
 
 
 @dataclass
+class OnlinePortsConfig:
+    enabled: bool = True
+    mode: str = "internet"       # internet (public cloud AI subnets) | ivre (local IVRE recon DB) | custom (hosts)
+    interval_minutes: int = 60
+    internet_sample_size: int = 150
+    hosts: list[str] = field(default_factory=lambda: ["127.0.0.1", "localhost", "host.docker.internal"])
+    subnets: list[str] = field(default_factory=list)  # additional custom CIDRs to sweep
+    ports_ollama: list[int] = field(default_factory=lambda: [11434])
+    ports_kobold: list[int] = field(default_factory=lambda: [5000, 5001, 5002])
+    timeout: float = 2.0
+    concurrency: int = 32
+    auto_use_for_triage: bool = False
+    ivre_cli_path: str = "ivre"
+
+
+@dataclass
 class DiscoveryConfig:
     interval_minutes: int = 60
     firehose_enabled: bool = True
@@ -83,6 +99,7 @@ class DiscoveryConfig:
     registries: RegistriesConfig = field(default_factory=RegistriesConfig)
     apk: ApkDiscoveryConfig = field(default_factory=ApkDiscoveryConfig)
     intelligence: IntelligenceConfig = field(default_factory=IntelligenceConfig)
+    online_ports: OnlinePortsConfig = field(default_factory=OnlinePortsConfig)
 
 
 @dataclass
@@ -227,6 +244,14 @@ class Config:
             self.notifications.discord.notify_on = env["DISCORD_NOTIFY_ON"]
         if env.get("DISCORD_CREATE_THREADS"):
             self.notifications.discord.create_threads = env["DISCORD_CREATE_THREADS"].lower() in ("1", "true", "yes")
+        if env.get("ONLINE_PORTS_ENABLED"):
+            self.discovery.online_ports.enabled = env["ONLINE_PORTS_ENABLED"].lower() in ("1", "true", "yes")
+        if env.get("ONLINE_PORTS_MODE"):
+            self.discovery.online_ports.mode = env["ONLINE_PORTS_MODE"].lower().strip()
+        if env.get("ONLINE_PORTS_HOSTS"):
+            self.discovery.online_ports.hosts = [h.strip() for h in env["ONLINE_PORTS_HOSTS"].split(",") if h.strip()]
+        if env.get("ONLINE_PORTS_SUBNETS"):
+            self.discovery.online_ports.subnets = [s.strip() for s in env["ONLINE_PORTS_SUBNETS"].split(",") if s.strip()]
 
     def ensure_dirs(self) -> None:
         Path(self.paths.data_dir).mkdir(parents=True, exist_ok=True)

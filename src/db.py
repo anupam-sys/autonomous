@@ -105,6 +105,26 @@ CREATE TABLE IF NOT EXISTS activity (
     target      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_activity_id ON activity(id);
+
+CREATE TABLE IF NOT EXISTS indexed_ports (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    host            TEXT NOT NULL,
+    port            INTEGER NOT NULL,
+    service_type    TEXT NOT NULL,          -- ollama | kobold | unknown
+    url             TEXT NOT NULL,
+    api_url         TEXT NOT NULL,
+    is_online       INTEGER NOT NULL DEFAULT 0,
+    is_open         INTEGER NOT NULL DEFAULT 0,  -- unauthenticated / exposed
+    models          TEXT NOT NULL DEFAULT '[]', -- JSON array of model names
+    latency_ms      REAL NOT NULL DEFAULT 0.0,
+    version_info    TEXT NOT NULL DEFAULT '',
+    source          TEXT NOT NULL DEFAULT 'port_scan',
+    last_checked    TEXT NOT NULL DEFAULT (datetime('now')),
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(host, port, service_type)
+);
+CREATE INDEX IF NOT EXISTS idx_indexed_ports_online ON indexed_ports(is_online, is_open);
+CREATE INDEX IF NOT EXISTS idx_indexed_ports_service ON indexed_ports(service_type);
 """
 
 
@@ -116,13 +136,13 @@ class Database:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         with self._lock, self._conn:
             self._conn.executescript(SCHEMA)
             self._migrate()
 
     def _migrate(self) -> None:
-        """Add columns introduced after the initial schema."""
+        """Add columns and tables introduced after the initial schema."""
         cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(findings)")}
         if "secret_enc" not in cols:
             self._conn.execute("ALTER TABLE findings ADD COLUMN secret_enc BLOB")
@@ -130,6 +150,29 @@ class Database:
         if "priority" not in tcols:
             self._conn.execute("ALTER TABLE targets ADD COLUMN priority REAL NOT NULL DEFAULT 0.0")
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_targets_priority ON targets(status, priority DESC)")
+        tables = {r["name"] for r in self._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "indexed_ports" not in tables:
+            self._conn.executescript("""
+                CREATE TABLE IF NOT EXISTS indexed_ports (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    host            TEXT NOT NULL,
+                    port            INTEGER NOT NULL,
+                    service_type    TEXT NOT NULL,
+                    url             TEXT NOT NULL,
+                    api_url         TEXT NOT NULL,
+                    is_online       INTEGER NOT NULL DEFAULT 0,
+                    is_open         INTEGER NOT NULL DEFAULT 0,
+                    models          TEXT NOT NULL DEFAULT '[]',
+                    latency_ms      REAL NOT NULL DEFAULT 0.0,
+                    version_info    TEXT NOT NULL DEFAULT '',
+                    source          TEXT NOT NULL DEFAULT 'port_scan',
+                    last_checked    TEXT NOT NULL DEFAULT (datetime('now')),
+                    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+                    UNIQUE(host, port, service_type)
+                );
+                CREATE INDEX IF NOT EXISTS idx_indexed_ports_online ON indexed_ports(is_online, is_open);
+                CREATE INDEX IF NOT EXISTS idx_indexed_ports_service ON indexed_ports(service_type);
+            """)
 
     def close(self) -> None:
         with self._lock:
@@ -499,6 +542,104 @@ class Database:
                 (key, value, value),
             )
 
+    # ---------------- indexed ports (ollama / kobold) ----------------
+
+    def upsert_indexed_port(
+        self,
+        host: str,
+        port: int,
+        service_type: str,
+        url: str,
+        api_url: str,
+        is_online: bool,
+        is_open: bool,
+        models: list[str] | str,
+        latency_ms: float = 0.0,
+        version_info: str = "",
+        source: str = "port_scan",
+    ) -> tuple[int, bool]:
+        """Insert or update an indexed port. Returns (port_id, is_new)."""
+        if isinstance(models, list):
+            models_json = json.dumps(models)
+        else:
+            models_json = str(models)
+
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT id FROM indexed_ports WHERE host = ? AND port = ? AND service_type = ?",
+                (host, port, service_type),
+            ).fetchone()
+            if row:
+                self._conn.execute(
+                    """UPDATE indexed_ports
+                       SET url = ?, api_url = ?, is_online = ?, is_open = ?,
+                           models = ?, latency_ms = ?, version_info = ?,
+                           source = ?, last_checked = datetime('now')
+                       WHERE id = ?""",
+                    (url, api_url, int(is_online), int(is_open),
+                     models_json, latency_ms, version_info, source, row["id"]),
+                )
+                return row["id"], False
+
+            cur = self._conn.execute(
+                """INSERT INTO indexed_ports
+                   (host, port, service_type, url, api_url, is_online, is_open,
+                    models, latency_ms, version_info, source, last_checked)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
+                (host, port, service_type, url, api_url, int(is_online), int(is_open),
+                 models_json, latency_ms, version_info, source),
+            )
+            return cur.lastrowid, True
+
+    def list_indexed_ports(
+        self,
+        service_type: str | None = None,
+        only_open: bool = False,
+        only_online: bool = False,
+    ) -> list[sqlite3.Row]:
+        """List indexed ports with optional filtering by service, open status, or online status."""
+        query = "SELECT * FROM indexed_ports WHERE 1=1"
+        params: list[Any] = []
+        if service_type:
+            query += " AND service_type = ?"
+            params.append(service_type)
+        if only_open:
+            query += " AND is_open = 1"
+        if only_online:
+            query += " AND is_online = 1"
+        query += " ORDER BY is_open DESC, is_online DESC, latency_ms ASC, id ASC"
+
+        with self._lock, self._conn:
+            return self._conn.execute(query, params).fetchall()
+
+    def get_indexed_port(self, port_id: int) -> sqlite3.Row | None:
+        with self._lock, self._conn:
+            return self._conn.execute(
+                "SELECT * FROM indexed_ports WHERE id = ?", (port_id,)
+            ).fetchone()
+
+    def delete_indexed_port(self, port_id: int) -> bool:
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "DELETE FROM indexed_ports WHERE id = ?", (port_id,)
+            )
+            return cur.rowcount > 0
+
+    def indexed_port_counts(self) -> dict[str, int]:
+        with self._lock, self._conn:
+            total = self._conn.execute("SELECT COUNT(*) FROM indexed_ports").fetchone()[0]
+            online = self._conn.execute("SELECT COUNT(*) FROM indexed_ports WHERE is_online = 1").fetchone()[0]
+            open_count = self._conn.execute("SELECT COUNT(*) FROM indexed_ports WHERE is_open = 1").fetchone()[0]
+            ollama = self._conn.execute("SELECT COUNT(*) FROM indexed_ports WHERE service_type = 'ollama'").fetchone()[0]
+            kobold = self._conn.execute("SELECT COUNT(*) FROM indexed_ports WHERE service_type = 'kobold'").fetchone()[0]
+            return {
+                "total": total,
+                "online": online,
+                "open": open_count,
+                "ollama": ollama,
+                "kobold": kobold,
+            }
+
     # ---------------- stats ----------------
 
     def counts(self) -> dict:
@@ -518,10 +659,12 @@ class Database:
             suggestions = self._conn.execute(
                 "SELECT COUNT(*) AS n FROM llm_suggestions WHERE status = 'pending'"
             ).fetchone()["n"]
+            ports_stats = self.indexed_port_counts()
         return {
             "targets_by_status": targets,
             "findings_total": findings,
             "findings_pending_triage": pending_triage,
             "suggestions_pending": suggestions,
+            "indexed_ports": ports_stats,
             "bandwidth_today_mb": round(self.bandwidth_today() / 1e6, 1),
         }

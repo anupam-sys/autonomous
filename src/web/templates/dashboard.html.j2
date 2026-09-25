@@ -234,6 +234,7 @@
   <button data-pane="findings">ANOMALY REPORTS</button>
   <button data-pane="sources">DIAGNOSTICS</button>
   <button data-pane="suggestions">NEURAL SUGGESTIONS</button>
+  <button data-pane="ports">ONLINE LLM PORTS</button>
   <button data-pane="config">CONFIG</button>
 </nav>
 
@@ -257,6 +258,55 @@
   <p class="meta">AI-synthesized discovery vectors. Approved directives are automatically integrated into the primary scanner network.</p>
   <table><thead><tr><th>ID</th><th>VECTOR TYPE</th><th>STATE</th><th>PAYLOAD</th><th>ACTIONS</th></tr></thead>
   <tbody id="sug-body"></tbody></table>
+</div>
+
+<div class="pane" id="pane-ports">
+  <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 15px; margin-bottom: 20px; padding: 15px 20px; background: var(--panel-bg); border: 1px solid var(--border); border-radius: 4px;">
+    <div>
+      <h2 style="font-size: 16px; color: var(--accent); margin-bottom: 4px;">ACTIVE NETWORK RECON — OLLAMA & KOBOLD</h2>
+      <p class="meta" style="margin: 0;">
+        IVRE-compatible active internet scanning & exposure telemetry for open LLM ports (11434 & 5000–5005).
+      </p>
+    </div>
+    <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+      <select id="port-scan-mode" style="padding: 6px 10px; background: rgba(0,0,0,0.5); border: 1px solid var(--border); color: var(--fg); font-family: inherit; font-size: 12px; border-radius: 3px;">
+        <option value="internet">🌐 INTERNET (Cloud AI Subnets)</option>
+        <option value="custom">🎯 CUSTOM TARGETS / CIDRS</option>
+        <option value="ivre">🦅 IVRE RECON DB</option>
+      </select>
+      <input type="text" id="port-scan-targets" placeholder="Optional CIDRs (e.g. 159.69.0.0/16, 138.68.0.0/16)" style="width: 280px; padding: 6px 12px; background: rgba(0,0,0,0.5); border: 1px solid var(--border); color: var(--fg); font-family: inherit; font-size: 12px; border-radius: 3px;" />
+      <button class="btn" style="background: rgba(0, 243, 255, 0.15); border-color: var(--accent); color: var(--accent); font-weight: bold;" onclick="triggerPortScan()">⚡ SCAN & INDEX</button>
+      <button class="btn" onclick="document.getElementById('port-scan-file-input').click()">📥 IMPORT SCAN</button>
+      <button class="btn" onclick="exportIvreXml()">📤 EXPORT FOR IVRE</button>
+      <input type="file" id="port-scan-file-input" style="display:none;" accept=".xml,.json,.txt" onchange="uploadScanFile(event)" />
+      <button class="btn" onclick="pollPorts()">🔄 REFRESH</button>
+    </div>
+  </div>
+
+  <div style="display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap; align-items: center;">
+    <button class="btn port-filter active" data-filter="" onclick="filterPorts('')">ALL (<span id="port-cnt-all">0</span>)</button>
+    <button class="btn port-filter" data-filter="open" onclick="filterPorts('open')">OPEN (<span id="port-cnt-open">0</span>)</button>
+    <button class="btn port-filter" data-filter="ollama" onclick="filterPorts('ollama')">OLLAMA (<span id="port-cnt-ollama">0</span>)</button>
+    <button class="btn port-filter" data-filter="kobold" onclick="filterPorts('kobold')">KOBOLD (<span id="port-cnt-kobold">0</span>)</button>
+    <span id="port-scan-status" style="margin-left: auto; font-size: 12px; color: var(--dim);"></span>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>SERVICE</th>
+        <th>ENDPOINT</th>
+        <th>STATE</th>
+        <th>AUTH</th>
+        <th>AVAILABLE MODELS</th>
+        <th>LATENCY</th>
+        <th>VERSION</th>
+        <th>LAST CHECKED</th>
+        <th>ACTIONS</th>
+      </tr>
+    </thead>
+    <tbody id="ports-body"></tbody>
+  </table>
 </div>
 
 <div class="pane" id="pane-config">
@@ -439,6 +489,14 @@ const CFG_SECTIONS = [
     ['discovery.apk.apkpure_recent', 'bool', 'APKPURE RECENT'],
     ['discovery.apk.target_packages', 'list', 'TARGET APK PACKAGES (NEWLINE DELIMITED)'],
   ]],
+  ['ONLINE PORT DISCOVERY (OLLAMA & KOBOLD)', [
+    ['discovery.online_ports.enabled', 'bool', 'ENABLE ONLINE PORT INDEXING'],
+    ['discovery.online_ports.interval_minutes', 'int', 'SCAN INTERVAL (MIN)'],
+    ['discovery.online_ports.hosts', 'list', 'TARGET HOSTS / CIDRS (NEWLINE DELIMITED)'],
+    ['discovery.online_ports.timeout', 'float', 'PROBE TIMEOUT (S)'],
+    ['discovery.online_ports.concurrency', 'int', 'SCAN CONCURRENCY'],
+    ['discovery.online_ports.auto_use_for_triage', 'bool', 'AUTO-SWITCH LLM TRIAGE TO OPEN INSTANCE'],
+  ]],
   ['THREAT ANALYSIS', [
     ['scan.interval_minutes', 'int', 'PROCESS TICK (MIN)'],
     ['scan.entropy_threshold', 'float', 'ENTROPY FLOOR'],
@@ -591,6 +649,197 @@ async function saveConfig() {
   }
 }
 
+/* ---------------- online ports tab ---------------- */
+let currentPortFilter = '';
+let allPortsData = [];
+
+async function pollPorts() {
+  try {
+    const r = await fetch(url('/api/ports'));
+    const d = await r.json();
+    allPortsData = d.ports || [];
+    renderPorts(allPortsData, currentPortFilter);
+    const cnt = d.counts || {};
+    set('port-cnt-all', cnt.total || 0);
+    set('port-cnt-open', cnt.open || 0);
+    set('port-cnt-ollama', cnt.ollama || 0);
+    set('port-cnt-kobold', cnt.kobold || 0);
+  } catch (err) {
+    console.error("pollPorts failed", err);
+  }
+}
+
+function filterPorts(type) {
+  currentPortFilter = type;
+  document.querySelectorAll('.port-filter').forEach(b => {
+    b.classList.toggle('active', (b.dataset.filter || '') === type);
+  });
+  renderPorts(allPortsData, type);
+}
+
+function renderPorts(ports, filter) {
+  const tbody = document.getElementById('ports-body');
+  if (!tbody) return;
+  let filtered = ports;
+  if (filter === 'open') filtered = ports.filter(p => p.is_open);
+  else if (filter === 'ollama') filtered = ports.filter(p => p.service_type === 'ollama');
+  else if (filter === 'kobold') filtered = ports.filter(p => p.service_type === 'kobold');
+
+  if (!filtered.length) {
+    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center; color:var(--dim); padding:20px;">No online ports indexed yet. Click SCAN & INDEX PORTS to initiate discovery.</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = filtered.map(p => {
+    const svcBadge = p.service_type === 'ollama' 
+      ? '<span style="color:#00f3ff; font-weight:bold; background:rgba(0,243,255,0.1); padding:2px 6px; border-radius:3px; border:1px solid rgba(0,243,255,0.3);">OLLAMA</span>'
+      : (p.service_type === 'kobold' 
+        ? '<span style="color:#ffb700; font-weight:bold; background:rgba(255,183,0,0.1); padding:2px 6px; border-radius:3px; border:1px solid rgba(255,183,0,0.3);">KOBOLD</span>'
+        : '<span style="color:var(--dim);">UNKNOWN</span>');
+
+    const stateBadge = p.is_online
+      ? '<span style="color:var(--green); font-weight:bold;">ONLINE</span>'
+      : '<span style="color:var(--red);">OFFLINE</span>';
+
+    const authBadge = p.is_open
+      ? '<span style="color:var(--green); font-weight:bold; background:rgba(0,255,157,0.1); padding:2px 6px; border-radius:3px; border:1px solid var(--green);">OPEN / UNPROTECTED</span>'
+      : '<span style="color:var(--gold); font-size:11px;">SECURED / AUTH</span>';
+
+    const modelsList = (p.models && p.models.length)
+      ? p.models.map(m => `<span style="display:inline-block; margin:2px; padding:1px 5px; background:rgba(255,255,255,0.05); border:1px solid var(--border); border-radius:3px; font-size:11px;">${escapeHtml(m)}</span>`).join(' ')
+      : '<span style="color:var(--dim); font-size:11px;">none listed</span>';
+
+    const latencyDisplay = p.latency_ms > 0 ? `${p.latency_ms.toFixed(0)} ms` : '-';
+
+    return `<tr>
+      <td>${svcBadge}</td>
+      <td><strong>${escapeHtml(p.host)}:${p.port}</strong><br/><span style="color:var(--dim); font-size:11px;">${escapeHtml(p.url)}</span></td>
+      <td>${stateBadge}</td>
+      <td>${authBadge}</td>
+      <td style="max-width:300px; word-break:break-all;">${modelsList}</td>
+      <td style="font-family:var(--font-mono);">${latencyDisplay}</td>
+      <td style="font-size:12px; color:var(--dim);">${escapeHtml(p.version_info || '-')}</td>
+      <td style="font-size:11px; color:var(--dim);">${escapeHtml(p.last_checked || '-')}</td>
+      <td>
+        <div style="display:flex; gap:5px; flex-wrap:wrap;">
+          ${p.is_open ? `<button class="btn" style="font-size:10px; padding:3px 6px; background:rgba(0,255,157,0.15); border-color:var(--green); color:var(--green);" onclick="usePortForLlm(${p.id})">🎯 USE FOR TRIAGE</button>` : ''}
+          <button class="btn" style="font-size:10px; padding:3px 6px;" onclick="checkPort(${p.id})">🔍 TEST</button>
+          <button class="btn" style="font-size:10px; padding:3px 6px; color:var(--red);" onclick="deletePort(${p.id})">✖</button>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+async function triggerPortScan() {
+  const statusEl = document.getElementById('port-scan-status');
+  const targetInp = document.getElementById('port-scan-targets');
+  const modeSel = document.getElementById('port-scan-mode');
+  const hosts = targetInp ? targetInp.value.trim() : '';
+  const mode = modeSel ? modeSel.value : 'internet';
+
+  if (statusEl) {
+    statusEl.textContent = mode === 'internet' 
+      ? 'Sampling & probing public cloud AI subnets...' 
+      : (mode === 'ivre' ? 'Querying local IVRE recon database...' : 'Probing target hosts...');
+    statusEl.style.color = 'var(--gold)';
+  }
+
+  try {
+    const r = await fetch(url('/api/ports/scan'), {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ hosts: hosts || undefined, mode: mode })
+    });
+    const d = await r.json();
+    if (statusEl) {
+      statusEl.textContent = `Scan complete: ${d.online} online, ${d.open} open interfaces found`;
+      statusEl.style.color = 'var(--green)';
+      setTimeout(() => { if (statusEl) statusEl.textContent = ''; }, 6000);
+    }
+    pollPorts();
+  } catch (err) {
+    if (statusEl) {
+      statusEl.textContent = `Scan failed: ${err.message}`;
+      statusEl.style.color = 'var(--red)';
+    }
+  }
+}
+
+async function uploadScanFile(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const statusEl = document.getElementById('port-scan-status');
+  if (statusEl) {
+    statusEl.textContent = `Ingesting scan output (${file.name})...`;
+    statusEl.style.color = 'var(--gold)';
+  }
+  const formData = new FormData();
+  formData.append('file', file);
+  try {
+    const r = await fetch(url('/api/ports/import_scan'), { method: 'POST', body: formData });
+    const d = await r.json();
+    if (d.ok) {
+      if (statusEl) {
+        statusEl.textContent = `Ingested: ${d.parsed_endpoints} endpoints parsed, ${d.verified_online} verified online`;
+        statusEl.style.color = 'var(--green)';
+      }
+      pollPorts();
+    } else {
+      if (statusEl) {
+        statusEl.textContent = `Import failed: ${d.error}`;
+        statusEl.style.color = 'var(--red)';
+      }
+    }
+  } catch (err) {
+    if (statusEl) {
+      statusEl.textContent = `Import error: ${err.message}`;
+      statusEl.style.color = 'var(--red)';
+    }
+  }
+  event.target.value = '';
+}
+
+function exportIvreXml() {
+  window.open(url('/api/ports/export_nmap'), '_blank');
+}
+
+async function usePortForLlm(pid) {
+  if (!confirm(`Activate this indexed interface as the primary neural network endpoint for LLM triage?`)) return;
+  try {
+    const r = await fetch(url(`/api/ports/${pid}/use`), { method: 'POST' });
+    const d = await r.json();
+    if (d.ok) {
+      alert(`LLM endpoint successfully re-routed to ${d.base_url} (Model: ${d.model})`);
+      loadConfig();
+    } else {
+      alert(`Failed to activate endpoint: ${d.error}`);
+    }
+  } catch (err) {
+    alert(`Request error: ${err.message}`);
+  }
+}
+
+async function checkPort(pid) {
+  try {
+    const r = await fetch(url(`/api/ports/${pid}/check`), { method: 'POST' });
+    const d = await r.json();
+    pollPorts();
+  } catch (err) {
+    alert(`Re-check failed: ${err.message}`);
+  }
+}
+
+async function deletePort(pid) {
+  if (!confirm('Remove this indexed port from catalog?')) return;
+  try {
+    await fetch(url(`/api/ports/${pid}`), { method: 'DELETE' });
+    pollPorts();
+  } catch (err) {
+    console.error(err);
+  }
+}
+
 document.querySelectorAll('nav.tabs button').forEach(b =>
   b.addEventListener('click', () => {
     document.querySelectorAll('nav.tabs button').forEach(x => x.classList.remove('active'));
@@ -599,17 +848,20 @@ document.querySelectorAll('nav.tabs button').forEach(b =>
     document.getElementById('pane-' + b.dataset.pane).classList.add('active');
     if (b.dataset.pane === 'config') {
       loadConfig();
+    } else if (b.dataset.pane === 'ports') {
+      pollPorts();
     }
   }));
 
 function set(id, v) { document.getElementById(id).textContent = v; }
 
-pollState(); pollEvents(); pollFindings(); pollRuns(); pollSuggestions(); loadConfig();
+pollState(); pollEvents(); pollFindings(); pollRuns(); pollSuggestions(); pollPorts(); loadConfig();
 setInterval(pollState, 4000);
 setInterval(pollEvents, 2000);
 setInterval(pollFindings, 15000);
 setInterval(pollRuns, 30000);
 setInterval(pollSuggestions, 30000);
+setInterval(pollPorts, 15000);
 </script>
 </body>
 </html>

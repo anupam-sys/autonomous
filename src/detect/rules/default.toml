@@ -330,3 +330,23 @@ service = "generic"
 secret_type = "url"
 severity = "low"
 confidence = 0.4
+
+[[rules]]
+id = "ollama-interface-url"
+description = "Exposed Ollama API interface endpoint"
+regex = '''https?://[A-Za-z0-9.\-]+:11434(?:/[^\s'"<>]*)?'''
+keywords = [":11434"]
+service = "ollama"
+secret_type = "url"
+severity = "medium"
+confidence = 0.85
+
+[[rules]]
+id = "kobold-interface-url"
+description = "Exposed KoboldAI/KoboldCpp API interface endpoint"
+regex = '''https?://[A-Za-z0-9.\-]+:500[0125](?:/[^\s'"<>]*)?'''
+keywords = [":5000", ":5001", ":5002", ":5005"]
+service = "kobold"
+secret_type = "url"
+severity = "medium"
+confidence = 0.85

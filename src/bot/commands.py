@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
+import re
 import tempfile
 import discord
 from discord import app_commands
@@ -332,6 +334,138 @@ def register_commands(bot: commands.Bot) -> None:
 
         await c.send(embed=embed, files=files)
 
+    # ------------------ /ports ------------------
+    @bot.tree.command(name="ports", description="List indexed online Ollama and Kobold interfaces")
+    async def slash_ports(interaction: discord.Interaction):
+        if not bot.is_authorized(interaction.user.id):
+            await interaction.response.send_message("⛔ Unauthorized.", ephemeral=True)
+            return
+
+        cnt = ctx.db.indexed_port_counts()
+        rows = ctx.db.list_indexed_ports()
+        embed = discord.Embed(
+            title="⚡ Indexed Online LLM Ports",
+            description=f"**{cnt['total']}** indexed • **{cnt['online']}** online • **{cnt['open']}** open interfaces",
+            color=0x00F3FF,
+        )
+        embed.add_field(name="Ollama Instances", value=str(cnt["ollama"]), inline=True)
+        embed.add_field(name="Kobold Instances", value=str(cnt["kobold"]), inline=True)
+        embed.add_field(name="Open (Unprotected)", value=str(cnt["open"]), inline=True)
+
+        if not rows:
+            embed.add_field(name="Endpoints", value="*No online ports indexed yet. Run `/scan_ports` to index.*", inline=False)
+        else:
+            lines = []
+            for r in rows[:10]:
+                models_preview = ""
+                try:
+                    m_list = json.loads(r["models"] or "[]")
+                    if m_list:
+                        models_preview = f" • Models: {', '.join(m_list[:2])}"
+                except Exception:
+                    pass
+                status_icon = "🟢" if r["is_online"] else "🔴"
+                auth_icon = "🔓 OPEN" if r["is_open"] else "🔒 AUTH"
+                lines.append(f"{status_icon} **{r['service_type'].upper()}** `{r['host']}:{r['port']}` ({auth_icon}) — {r['latency_ms']:.0f}ms{models_preview}")
+            embed.add_field(name="Indexed Interfaces (Latest 10)", value="\n".join(lines), inline=False)
+
+        await interaction.response.send_message(embed=embed)
+
+    @bot.command(name="ports")
+    async def cmd_ports(c):
+        if not bot.is_authorized(c.author.id):
+            return
+        cnt = ctx.db.indexed_port_counts()
+        rows = ctx.db.list_indexed_ports()
+        embed = discord.Embed(
+            title="⚡ Indexed Online LLM Ports",
+            description=f"**{cnt['total']}** indexed • **{cnt['online']}** online • **{cnt['open']}** open interfaces",
+            color=0x00F3FF,
+        )
+        embed.add_field(name="Ollama Instances", value=str(cnt["ollama"]), inline=True)
+        embed.add_field(name="Kobold Instances", value=str(cnt["kobold"]), inline=True)
+        embed.add_field(name="Open (Unprotected)", value=str(cnt["open"]), inline=True)
+        if not rows:
+            embed.add_field(name="Endpoints", value="*No online ports indexed yet. Run `!scan_ports` to index.*", inline=False)
+        else:
+            lines = []
+            for r in rows[:10]:
+                models_preview = ""
+                try:
+                    m_list = json.loads(r["models"] or "[]")
+                    if m_list:
+                        models_preview = f" • Models: {', '.join(m_list[:2])}"
+                except Exception:
+                    pass
+                status_icon = "🟢" if r["is_online"] else "🔴"
+                auth_icon = "🔓 OPEN" if r["is_open"] else "🔒 AUTH"
+                lines.append(f"{status_icon} **{r['service_type'].upper()}** `{r['host']}:{r['port']}` ({auth_icon}) — {r['latency_ms']:.0f}ms{models_preview}")
+            embed.add_field(name="Indexed Interfaces", value="\n".join(lines), inline=False)
+        await c.send(embed=embed)
+
+    # ------------------ /scan_ports ------------------
+    @bot.tree.command(name="scan_ports", description="Scan and index online ports for open Ollama & Kobold interfaces")
+    @app_commands.describe(hosts="Optional hosts/CIDRs (e.g. '127.0.0.1, 192.168.1.0/28')")
+    async def slash_scan_ports(interaction: discord.Interaction, hosts: str | None = None):
+        if not bot.is_authorized(interaction.user.id):
+            await interaction.response.send_message("⛔ Unauthorized.", ephemeral=True)
+            return
+
+        await interaction.response.defer()
+        target_hosts = [h.strip() for h in re.split(r"[,\s]+", hosts)] if hosts else None
+        from ..discovery.port_indexer import scan_and_index_ports
+
+        loop = asyncio.get_running_loop()
+        results = await loop.run_in_executor(
+            None, scan_and_index_ports, ctx, target_hosts, None, None, 16, 2.0, "discord_bot"
+        )
+        online_count = sum(1 for r in results if r.is_online)
+        open_count = sum(1 for r in results if r.is_open)
+
+        embed = discord.Embed(
+            title="🔍 Online Port Indexing Complete",
+            description=f"Scanned **{len(results)}** endpoints: **{online_count}** online, **{open_count}** open interfaces.",
+            color=0x2ECC71 if open_count > 0 else 0x3498DB,
+        )
+        for r in results:
+            if r.is_online:
+                m_str = f"Models: {', '.join(r.models[:2])}" if r.models else "No models listed"
+                embed.add_field(
+                    name=f"{r.service_type.upper()} @ {r.host}:{r.port}",
+                    value=f"{'🔓 OPEN' if r.is_open else '🔒 AUTH'} • {r.latency_ms:.0f}ms • {m_str}",
+                    inline=False,
+                )
+        await interaction.followup.send(embed=embed)
+
+    @bot.command(name="scan_ports")
+    async def cmd_scan_ports(c, hosts: str | None = None):
+        if not bot.is_authorized(c.author.id):
+            return
+        target_hosts = [h.strip() for h in re.split(r"[,\s]+", hosts)] if hosts else None
+        from ..discovery.port_indexer import scan_and_index_ports
+
+        loop = asyncio.get_running_loop()
+        results = await loop.run_in_executor(
+            None, scan_and_index_ports, ctx, target_hosts, None, None, 16, 2.0, "discord_bot"
+        )
+        online_count = sum(1 for r in results if r.is_online)
+        open_count = sum(1 for r in results if r.is_open)
+
+        embed = discord.Embed(
+            title="🔍 Online Port Indexing Complete",
+            description=f"Scanned **{len(results)}** endpoints: **{online_count}** online, **{open_count}** open interfaces.",
+            color=0x2ECC71 if open_count > 0 else 0x3498DB,
+        )
+        for r in results:
+            if r.is_online:
+                m_str = f"Models: {', '.join(r.models[:2])}" if r.models else "No models listed"
+                embed.add_field(
+                    name=f"{r.service_type.upper()} @ {r.host}:{r.port}",
+                    value=f"{'🔓 OPEN' if r.is_open else '🔒 AUTH'} • {r.latency_ms:.0f}ms • {m_str}",
+                    inline=False,
+                )
+        await c.send(embed=embed)
+
     # ------------------ /help ------------------
     @bot.tree.command(name="help", description="Show available commands and bot capabilities")
     async def slash_help(interaction: discord.Interaction):
@@ -341,11 +475,14 @@ def register_commands(bot: commands.Bot) -> None:
             "🚨 **Instant Key Alerts:** The bot immediately posts detected secrets with interactive discussion threads.\n"
             "💬 **Ask Questions:** Chat in any finding's thread or use `/ask` to analyze risk, permissions, and rotation.\n"
             "📱 **Scan APKs:** Use `/scan_apk` or drop an `.apk` file directly in Discord!\n"
-            "💻 **Scan Repos:** Use `/scan_repo <git_url>` to scan git repositories."
+            "💻 **Scan Repos:** Use `/scan_repo <git_url>` to scan git repositories.\n"
+            "⚡ **Index LLM Ports:** Use `/ports` and `/scan_ports` to find open Ollama & Kobold interfaces."
         )
         embed.add_field(name="/status", value="View daemon health, worker queues, bandwidth", inline=True)
         embed.add_field(name="/finding <id>", value="Retrieve decrypted secret & context for a finding", inline=True)
         embed.add_field(name="/ask <question>", value="Ask LLM questions about a finding", inline=True)
+        embed.add_field(name="/ports", value="List indexed online Ollama & Kobold interfaces", inline=True)
+        embed.add_field(name="/scan_ports", value="Scan and index online ports for open LLMs", inline=True)
         embed.add_field(name="/scan_apk", value="Scan an APK package, URL, or uploaded file", inline=True)
         embed.add_field(name="/scan_repo", value="Clone and scan a Git repository", inline=True)
         embed.add_field(name="/triage", value="Set finding status (true_positive, etc.)", inline=True)

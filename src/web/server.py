@@ -13,6 +13,8 @@ Optional bearer token for when it's exposed beyond localhost.
 from __future__ import annotations
 
 import dataclasses
+import json
+import re
 from pathlib import Path
 
 from flask import Flask, jsonify, render_template, request
@@ -55,6 +57,15 @@ EDITABLE: dict[str, str] = {
     "discovery.apk.fdroid": "bool", "discovery.apk.apkmirror_recent": "bool",
     "discovery.apk.apkpure_recent": "bool",
     "discovery.apk.target_packages": "list",
+    "discovery.online_ports.enabled": "bool",
+    "discovery.online_ports.mode": "choice:internet,ivre,custom",
+    "discovery.online_ports.internet_sample_size": "int",
+    "discovery.online_ports.interval_minutes": "int",
+    "discovery.online_ports.hosts": "list",
+    "discovery.online_ports.subnets": "list",
+    "discovery.online_ports.timeout": "float",
+    "discovery.online_ports.concurrency": "int",
+    "discovery.online_ports.auto_use_for_triage": "bool",
     "discovery.intelligence.enabled": "bool",
     "discovery.intelligence.min_relevance_score": "float",
     "discovery.intelligence.filter_spam": "bool",
@@ -202,6 +213,203 @@ def create_app(cfg: Config, db: Database | None = None) -> Flask:
         if secret is None:
             return jsonify({"error": "no stored value (predates encrypted storage)"}), 404
         return jsonify({"secret": secret})
+
+    # ---------------- online ports (ollama / kobold) ----------------
+
+    @app.get("/api/ports")
+    def get_ports():
+        svc = request.args.get("service")
+        only_open = request.args.get("open") in ("1", "true")
+        only_online = request.args.get("online") in ("1", "true")
+        rows = db.list_indexed_ports(service_type=svc, only_open=only_open, only_online=only_online)
+        res = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["models"] = json.loads(d.get("models") or "[]")
+            except Exception:
+                d["models"] = []
+            res.append(d)
+        return jsonify({
+            "ports": res,
+            "counts": db.indexed_port_counts(),
+        })
+
+    @app.post("/api/ports/scan")
+    def post_scan_ports():
+        data = request.get_json(silent=True) or {}
+        hosts = data.get("hosts")
+        if isinstance(hosts, str):
+            hosts = [h.strip() for h in re.split(r"[,\s]+", hosts) if h.strip()]
+        ports_ollama = data.get("ports_ollama")
+        ports_kobold = data.get("ports_kobold")
+        timeout = float(data.get("timeout") or 2.0)
+        concurrency = int(data.get("concurrency") or 32)
+        mode = data.get("mode") or "auto"
+
+        from ..discovery.port_indexer import scan_and_index_ports
+
+        class _ScanCtx:
+            def __init__(self, c, d):
+                self.cfg = c
+                self.db = d
+
+        results = scan_and_index_ports(
+            _ScanCtx(cfg, db),
+            hosts=hosts,
+            ports_ollama=ports_ollama,
+            ports_kobold=ports_kobold,
+            concurrency=concurrency,
+            timeout=timeout,
+            source="manual_web",
+            mode=mode,
+        )
+        return jsonify({
+            "ok": True,
+            "scanned": len(results),
+            "online": sum(1 for r in results if r.is_online),
+            "open": sum(1 for r in results if r.is_open),
+            "results": [r.to_dict() for r in results],
+            "counts": db.indexed_port_counts(),
+        })
+
+    @app.get("/api/ports/export_nmap")
+    def export_ports_nmap():
+        """Export indexed online ports to Nmap XML for IVRE integration (ivre scan2db)."""
+        from ..discovery.port_indexer import PortProbeResult, export_to_nmap_xml
+        from flask import Response
+        rows = db.list_indexed_ports(only_online=True)
+        probe_results = []
+        for r in rows:
+            models = []
+            try:
+                models = json.loads(r["models"] or "[]")
+            except Exception:
+                pass
+            probe_results.append(PortProbeResult(
+                host=r["host"],
+                port=r["port"],
+                service_type=r["service_type"],
+                is_online=bool(r["is_online"]),
+                is_open=bool(r["is_open"]),
+                models=models,
+                version_info=r["version_info"],
+            ))
+        xml_content = export_to_nmap_xml(probe_results)
+        return Response(xml_content, mimetype="application/xml",
+                        headers={"Content-Disposition": "attachment; filename=ollama_kobold_ivre.xml"})
+
+    @app.post("/api/ports/import_scan")
+    def import_ports_scan():
+        """Ingest Masscan or Nmap XML/JSON scan file into the indexer (like IVRE scan2db)."""
+        content = ""
+        if "file" in request.files:
+            content = request.files["file"].read().decode("utf-8", errors="replace")
+        else:
+            data = request.get_json(silent=True) or {}
+            content = data.get("content") or ""
+
+        if not content:
+            return jsonify({"error": "No scan file or content provided"}), 400
+
+        from ..discovery.port_indexer import parse_scan_output, probe_port
+        endpoints = parse_scan_output(content)
+        if not endpoints:
+            return jsonify({"error": "No open port entries parsed from scan output"}), 400
+
+        verified = 0
+        for host, port in endpoints:
+            hint = "ollama" if port == 11434 else ("kobold" if port in (5000, 5001, 5002) else None)
+            res = probe_port(host, port, timeout=2.0, service_hint=hint, source="scan_import")
+            db.upsert_indexed_port(
+                host=res.host,
+                port=res.port,
+                service_type=res.service_type if res.service_type != "unknown" else (hint or "unknown"),
+                url=res.url,
+                api_url=res.api_url,
+                is_online=res.is_online,
+                is_open=res.is_open,
+                models=res.models,
+                latency_ms=res.latency_ms,
+                version_info=res.version_info,
+                source="scan_import",
+            )
+            if res.is_online:
+                verified += 1
+
+        return jsonify({
+            "ok": True,
+            "parsed_endpoints": len(endpoints),
+            "verified_online": verified,
+            "counts": db.indexed_port_counts(),
+        })
+
+    @app.post("/api/ports/<int:pid>/check")
+    def post_check_port(pid: int):
+        row = db.get_indexed_port(pid)
+        if not row:
+            return jsonify({"error": "not found"}), 404
+        from ..discovery.port_indexer import probe_port
+        res = probe_port(row["host"], row["port"], timeout=2.5, service_hint=row["service_type"], source="manual_check")
+        db.upsert_indexed_port(
+            host=res.host,
+            port=res.port,
+            service_type=res.service_type if res.service_type != "unknown" else row["service_type"],
+            url=res.url,
+            api_url=res.api_url,
+            is_online=res.is_online,
+            is_open=res.is_open,
+            models=res.models,
+            latency_ms=res.latency_ms,
+            version_info=res.version_info,
+            source="manual_check",
+        )
+        return jsonify({"ok": True, "result": res.to_dict()})
+
+    @app.post("/api/ports/<int:pid>/use")
+    def post_use_port_for_llm(pid: int):
+        if not _write_allowed():
+            return jsonify({"error": "unauthorized"}), 403
+        row = db.get_indexed_port(pid)
+        if not row:
+            return jsonify({"error": "not found"}), 404
+        api_url = row["api_url"]
+        if not api_url:
+            return jsonify({"error": "port has no API endpoint"}), 400
+
+        models = []
+        try:
+            models = json.loads(row["models"] or "[]")
+        except Exception:
+            pass
+
+        updates = {
+            "llm.base_url": api_url,
+            "llm.enabled": True,
+        }
+        if models:
+            updates["llm.model"] = models[0]
+
+        overlay = getattr(cfg, "_overlay_path", "config.local.yaml")
+        save_overlay(updates, overlay)
+        fresh = Config.load(getattr(cfg, "_base_path", "config.yaml"), overlay)
+        for f in dataclasses.fields(Config):
+            setattr(cfg, f.name, getattr(fresh, f.name))
+
+        logger.info("Switched LLM endpoint to %s (model: %s)", api_url, cfg.llm.model)
+        return jsonify({
+            "ok": True,
+            "base_url": cfg.llm.base_url,
+            "model": cfg.llm.model,
+            "enabled": cfg.llm.enabled,
+        })
+
+    @app.delete("/api/ports/<int:pid>")
+    def delete_port(pid: int):
+        if not _write_allowed():
+            return jsonify({"error": "unauthorized"}), 403
+        deleted = db.delete_indexed_port(pid)
+        return jsonify({"ok": deleted})
 
     # ---------------- configuration ----------------
 

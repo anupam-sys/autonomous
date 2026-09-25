@@ -22,6 +22,7 @@ def run_discovery(ctx) -> dict:
     from .github_recent import GithubRecentSource
     from .gitlab_source import GitlabSource
     from .intelligence import evaluate_target
+    from .port_source import OnlinePortSource
     from .registry_source import DockerHubSource, NpmSource, PypiSource
 
     d = ctx.cfg.discovery
@@ -48,6 +49,8 @@ def run_discovery(ctx) -> dict:
         sources.append(ApkPureSource())
     if d.apk.target_packages:
         sources.append(TargetListSource())
+    if getattr(d, "online_ports", None) and d.online_ports.enabled:
+        sources.append(OnlinePortSource())
 
     intel_cfg = getattr(d, "intelligence", None)
     intel_enabled = getattr(intel_cfg, "enabled", True) if intel_cfg else True
