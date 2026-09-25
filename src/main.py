@@ -189,8 +189,14 @@ def cmd_run(cfg: Config, once: bool) -> None:
             logger.info("=== pipeline pass starting ===")
             run_pass(ctx)
             elapsed = (datetime.now(timezone.utc) - started).total_seconds()
-            sleep_s = max(60.0, tick - elapsed)
-            logger.info("=== pass done in %.0fs — sleeping %ds ===", elapsed, sleep_s)
+            pending = ctx.queue.pending_count()
+            if pending > 0:
+                sleep_s = 2.0
+                logger.info("=== pass done in %.0fs — %d targets still pending; next pass in %.0fs ===",
+                            elapsed, pending, sleep_s)
+            else:
+                sleep_s = max(5.0, tick - elapsed)
+                logger.info("=== pass done in %.0fs — sleeping %ds ===", elapsed, sleep_s)
             shared["sleep_until"] = time.monotonic() + sleep_s
             time.sleep(sleep_s)
             shared.pop("sleep_until", None)

@@ -10,12 +10,23 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import zipfile
 from pathlib import Path
 
 from ..log import get_logger
 
 logger = get_logger("decompile")
+
+_jadx_semaphores: dict[int, threading.Semaphore] = {}
+_sem_lock = threading.Lock()
+
+
+def _get_jadx_semaphore(limit: int) -> threading.Semaphore:
+    with _sem_lock:
+        if limit not in _jadx_semaphores:
+            _jadx_semaphores[limit] = threading.Semaphore(limit)
+        return _jadx_semaphores[limit]
 
 
 class DecompileFailed(Exception):
@@ -47,13 +58,16 @@ def decompile_apk(ctx, apk_path: Path, out_dir: Path) -> Path:
     cmd = [jadx, "-d", str(out_dir), *ctx.cfg.tools.jadx_extra_args, str(apk_path)]
     if jadx.lower().endswith(".bat"):  # Windows batch files need cmd.exe
         cmd = ["cmd", "/c", *cmd]
+    limit = max(1, getattr(ctx.cfg.limits, "jadx_concurrency", 1))
+    sem = _get_jadx_semaphore(limit)
     try:
-        proc = subprocess.run(
-            cmd,
-            timeout=ctx.cfg.tools.jadx_timeout_min * 60,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-        )
+        with sem:
+            proc = subprocess.run(
+                cmd,
+                timeout=ctx.cfg.tools.jadx_timeout_min * 60,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
     except subprocess.TimeoutExpired as exc:
         raise DecompileFailed("jadx timed out") from exc
 

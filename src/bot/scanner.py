@@ -59,6 +59,15 @@ def scan_target_on_demand(
                 ctx, target, target_locator, slug, data_dir, progress_callback
             )
 
+        if findings_new > 0 and getattr(ctx.cfg.llm, "enabled", False):
+            if progress_callback:
+                progress_callback("🤖 Verifying secrets with AI triage before alerting...")
+            try:
+                from ..triage.triage import run_triage
+                run_triage(ctx)
+            except Exception as t_err:
+                logger.warning("Post-scan on-demand triage failed: %s", t_err)
+
         ctx.queue.complete(target.id)
         if progress_callback:
             progress_callback(
@@ -114,18 +123,19 @@ def _scan_apk(ctx, target: Target, locator: str, slug: str, data_dir: Path, prog
     for f in bres.findings:
         if ctx.db.insert_finding(f):
             new_findings += 1
-            notify_finding(ctx, {
-                "id": f.id,
-                "severity": f.severity,
-                "detector": f.detector,
-                "service": f.service,
-                "target_name": target.name,
-                "target_kind": target.kind.value,
-                "file_path": f.file_path,
-                "line": f.line,
-                "secret_preview": f.secret_preview,
-                "secret_full": f.secret_full,
-            }, "pending")
+            if ctx.cfg.notifications.discord.notify_on in ("any", "high_severity"):
+                notify_finding(ctx, {
+                    "id": f.id,
+                    "severity": f.severity,
+                    "detector": f.detector,
+                    "service": f.service,
+                    "target_name": target.name,
+                    "target_kind": target.kind.value,
+                    "file_path": f.file_path,
+                    "line": f.line,
+                    "secret_preview": f.secret_preview,
+                    "secret_full": f.secret_full,
+                }, "pending")
 
     total_files = bres.entries_scanned
     mode = ctx.cfg.scan.apk_decompile_mode
@@ -145,18 +155,19 @@ def _scan_apk(ctx, target: Target, locator: str, slug: str, data_dir: Path, prog
         for f in more_findings:
             if ctx.db.insert_finding(f):
                 new_findings += 1
-                notify_finding(ctx, {
-                    "id": f.id,
-                    "severity": f.severity,
-                    "detector": f.detector,
-                    "service": f.service,
-                    "target_name": target.name,
-                    "target_kind": target.kind.value,
-                    "file_path": f.file_path,
-                    "line": f.line,
-                    "secret_preview": f.secret_preview,
-                    "secret_full": f.secret_full,
-                }, "pending")
+                if ctx.cfg.notifications.discord.notify_on in ("any", "high_severity"):
+                    notify_finding(ctx, {
+                        "id": f.id,
+                        "severity": f.severity,
+                        "detector": f.detector,
+                        "service": f.service,
+                        "target_name": target.name,
+                        "target_kind": target.kind.value,
+                        "file_path": f.file_path,
+                        "line": f.line,
+                        "secret_preview": f.secret_preview,
+                        "secret_full": f.secret_full,
+                    }, "pending")
 
         if ctx.cfg.limits.work_retention == "delete":
             force_rmtree(out_dir)
@@ -192,18 +203,19 @@ def _scan_repo(ctx, target: Target, locator: str, slug: str, data_dir: Path, pro
     for f in findings:
         if ctx.db.insert_finding(f):
             new_findings += 1
-            notify_finding(ctx, {
-                "id": f.id,
-                "severity": f.severity,
-                "detector": f.detector,
-                "service": f.service,
-                "target_name": target.name,
-                "target_kind": target.kind.value,
-                "file_path": f.file_path,
-                "line": f.line,
-                "secret_preview": f.secret_preview,
-                "secret_full": f.secret_full,
-            }, "pending")
+            if ctx.cfg.notifications.discord.notify_on in ("any", "high_severity"):
+                notify_finding(ctx, {
+                    "id": f.id,
+                    "severity": f.severity,
+                    "detector": f.detector,
+                    "service": f.service,
+                    "target_name": target.name,
+                    "target_kind": target.kind.value,
+                    "file_path": f.file_path,
+                    "line": f.line,
+                    "secret_preview": f.secret_preview,
+                    "secret_full": f.secret_full,
+                }, "pending")
 
     if ctx.cfg.limits.work_retention == "delete":
         force_rmtree(path)

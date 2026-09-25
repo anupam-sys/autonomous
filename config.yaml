@@ -13,31 +13,31 @@ paths:
 # --- resource knobs: defaults are for a SMALL VPS (2 vCPU/4GB).
 # Raise these when you move to a bigger box. ---
 limits:
-  workers: 2                    # concurrent acquire/decompile jobs
-  jadx_concurrency: 1           # concurrent jadx processes (RAM-hungry)
-  max_apk_mb: 150               # skip APKs larger than this
-  max_repo_mb: 300              # skip repos larger than this
-  daily_bandwidth_mb: 5120      # stop downloading when exceeded
+  workers: 8                    # concurrent acquire/decompile jobs
+  jadx_concurrency: 4           # concurrent jadx processes (RAM-hungry)
+  max_apk_mb: 300               # skip APKs larger than this
+  max_repo_mb: 500              # skip repos larger than this
+  daily_bandwidth_mb: 51200     # stop downloading when exceeded
   work_retention: "on_finding"  # keep | on_finding | delete  (work files after scan)
 
 # --- Stage 1: discovery ---
 discovery:
-  interval_minutes: 60          # how often discovery sources run
+  interval_minutes: 15          # how often discovery sources run
   firehose_enabled: true        # GitHub public events firehose (no token needed)
   gitlab_enabled: true
-  bitbucket_enabled: false
+  bitbucket_enabled: true
   github_recent:
     enabled: true
     token: ""                   # drop a classic PAT here -> enables dork code-search
-    per_page: 50
+    per_page: 100
   registries:
     npm: true
     pypi: true
-    docker_hub: false
+    docker_hub: true
   apk:
     fdroid: true
     apkmirror_recent: true
-    apkpure_recent: false
+    apkpure_recent: true
     target_packages: []         # e.g. ["com.example.app"] — always fetched
   intelligence:
     enabled: true               # smart target evaluation & noise/spam filtering
@@ -59,7 +59,7 @@ tools:
 
 # --- Stage 3: scanning ---
 scan:
-  interval_minutes: 5           # scheduler tick (discovery/report have their
+  interval_minutes: 2           # scheduler tick (discovery/report have their
                                 # own interval gates; this drives acquire/scan)
   entropy_threshold: 4.5        # Shannon entropy floor for generic secrets
   min_secret_length: 8
@@ -78,8 +78,8 @@ llm:
   model: "gpt-4o-mini"
   timeout_seconds: 60
   triage_confidence_floor: 0.5  # only LLM-triage findings at/above this confidence
-  max_findings_per_run: 100     # LLM cost cap per pipeline pass
-  batch_size: 15                # findings triaged per request (saves API calls)
+  max_findings_per_run: 500     # LLM cost cap per pipeline pass
+  batch_size: 25                # findings triaged per request (saves API calls)
   ai_discovery:
     enabled: false
     allow_auto_dorks: false     # false = suggestions wait for approval in DB
@@ -110,7 +110,7 @@ notifications:
     bot_token: ""               # Discord Bot token (for interactive threads, Q&A, and scanning)
     channel_id: null            # Discord Channel ID where finding alerts are posted
     authorized_users: []        # List of Discord user IDs allowed to run commands (empty = all in channel)
-    notify_on: "any"            # any | high_severity | true_positive ("any" = instant alerts)
+    notify_on: "true_positive"  # true_positive (only verified real secrets) | high_severity | any
     create_threads: true        # create interactive thread for each finding to chat/ask questions
 
 log_level: "INFO"

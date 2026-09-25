@@ -29,51 +29,76 @@ _SKIP = (BudgetExceeded, FileTooLarge, ApkResolveFailed, CloneFailed,
 
 def run_acquire(ctx) -> dict:
     stats = {"acquired": 0, "skipped": 0, "failed": 0}
-    batch = max(1, ctx.cfg.limits.workers) * 2
+    workers = max(1, getattr(ctx.cfg.limits, "workers", 2))
+    batch = max(workers * 8, 64)
     intel_cfg = getattr(ctx.cfg.discovery, "intelligence", None)
     intel_enabled = getattr(intel_cfg, "enabled", True) if intel_cfg else True
 
-    for target in ctx.queue.claim(batch):
-        if intel_enabled:
-            ev = evaluate_target(target, cfg=intel_cfg)
-            if not ev.keep:
-                ctx.queue.skip(target.id, f"intelligence: {ev.reason}")
-                stats["skipped"] += 1
-                logger.info("skipped %s (intelligence): %s", target.name, ev.reason)
-                emit(ctx, "acquire", f"skipped {target.name}: {ev.reason}",
-                     target.name, level="warn")
-                continue
+    targets = ctx.queue.claim(batch)
+    if not targets:
+        return stats
 
-        emit(ctx, "acquire",
-             f"downloading {target.kind.value}: {target.name} <- {target.locator}",
-             target.name)
-        try:
-            artifact, needs_scan = _process(ctx, target)
-        except _SKIP as exc:
-            ctx.queue.skip(target.id, f"{type(exc).__name__}: {exc}")
-            stats["skipped"] += 1
-            logger.info("skipped %s: %s: %s", target.name, type(exc).__name__, exc)
-            emit(ctx, "acquire", f"skipped {target.name}: {exc}",
-                 target.name, level="warn")
-            continue
-        except Exception as exc:  # unexpected -> failed, keeps the loop alive
-            logger.exception("acquire failed for %s", target.name)
-            ctx.queue.fail(target.id, str(exc)[:500])
-            stats["failed"] += 1
-            emit(ctx, "acquire", f"FAILED {target.name}: {exc}",
-                 target.name, level="error")
-            continue
-        ctx.db.insert_artifact(artifact)
-        if needs_scan:
-            ctx.queue.mark_acquired(target.id)
-        else:
-            ctx.queue.complete(target.id)  # fully handled at acquire time
-        stats["acquired"] += 1
-        logger.info("target %s acquired -> %s", target.name, artifact.path)
-        emit(ctx, "acquire",
-             f"acquired {target.name} ({artifact.size_bytes / 1e6:.1f}MB) -> {artifact.path}",
-             target.name)
+    if workers == 1 or len(targets) == 1:
+        for target in targets:
+            status = _acquire_single(ctx, target, intel_cfg, intel_enabled)
+            stats[status] = stats.get(status, 0) + 1
+    else:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            fut_map = {
+                executor.submit(_acquire_single, ctx, t, intel_cfg, intel_enabled): t
+                for t in targets
+            }
+            for fut in as_completed(fut_map):
+                t = fut_map[fut]
+                try:
+                    status = fut.result()
+                    stats[status] = stats.get(status, 0) + 1
+                except Exception as exc:
+                    logger.exception("Unexpected error acquiring %s: %s", t.name, exc)
+                    stats["failed"] += 1
     return stats
+
+
+def _acquire_single(ctx, target: Target, intel_cfg, intel_enabled: bool) -> str:
+    """Acquire a single target with intelligence pre-filtering and error recording."""
+    if intel_enabled:
+        ev = evaluate_target(target, cfg=intel_cfg)
+        if not ev.keep:
+            ctx.queue.skip(target.id, f"intelligence: {ev.reason}")
+            logger.info("skipped %s (intelligence): %s", target.name, ev.reason)
+            emit(ctx, "acquire", f"skipped {target.name}: {ev.reason}",
+                 target.name, level="warn")
+            return "skipped"
+
+    emit(ctx, "acquire",
+         f"downloading {target.kind.value}: {target.name} <- {target.locator}",
+         target.name)
+    try:
+        artifact, needs_scan = _process(ctx, target)
+    except _SKIP as exc:
+        ctx.queue.skip(target.id, f"{type(exc).__name__}: {exc}")
+        logger.info("skipped %s: %s: %s", target.name, type(exc).__name__, exc)
+        emit(ctx, "acquire", f"skipped {target.name}: {exc}",
+             target.name, level="warn")
+        return "skipped"
+    except Exception as exc:  # unexpected -> failed, keeps the loop alive
+        logger.exception("acquire failed for %s", target.name)
+        ctx.queue.fail(target.id, str(exc)[:500])
+        emit(ctx, "acquire", f"FAILED {target.name}: {exc}",
+             target.name, level="error")
+        return "failed"
+
+    ctx.db.insert_artifact(artifact)
+    if needs_scan:
+        ctx.queue.mark_acquired(target.id)
+    else:
+        ctx.queue.complete(target.id)  # fully handled at acquire time
+    logger.info("target %s acquired -> %s", target.name, artifact.path)
+    emit(ctx, "acquire",
+         f"acquired {target.name} ({artifact.size_bytes / 1e6:.1f}MB) -> {artifact.path}",
+         target.name)
+    return "acquired"
 
 
 def _process(ctx, target: Target) -> tuple[Artifact, bool]:

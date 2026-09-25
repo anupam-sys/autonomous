@@ -19,11 +19,11 @@ class PathsConfig:
 
 @dataclass
 class LimitsConfig:
-    workers: int = 2
-    jadx_concurrency: int = 1
-    max_apk_mb: int = 150
-    max_repo_mb: int = 300
-    daily_bandwidth_mb: int = 5120
+    workers: int = 8
+    jadx_concurrency: int = 4
+    max_apk_mb: int = 300
+    max_repo_mb: int = 500
+    daily_bandwidth_mb: int = 51200
     work_retention: str = "on_finding"  # keep | on_finding | delete
 
 
@@ -122,8 +122,8 @@ class LlmConfig:
     model: str = "gpt-4o-mini"
     timeout_seconds: int = 60
     triage_confidence_floor: float = 0.5
-    max_findings_per_run: int = 100
-    batch_size: int = 15
+    max_findings_per_run: int = 500
+    batch_size: int = 25
     ai_discovery: AiDiscoveryConfig = field(default_factory=AiDiscoveryConfig)
 
 
@@ -149,7 +149,7 @@ class DiscordConfig:
     bot_token: str = ""
     channel_id: int | str | None = None
     authorized_users: list[int] = field(default_factory=list)
-    notify_on: str = "any"  # any, high_severity, true_positive
+    notify_on: str = "true_positive"  # any, high_severity, true_positive
     create_threads: bool = True
 
 
