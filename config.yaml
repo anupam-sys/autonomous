@@ -49,21 +49,21 @@ discovery:
     smart_git_filter: true      # blobless clone: skip files > max_file_kb during clone
     selective_extract: true     # package extraction: skip images, binaries, docs
   online_ports:
-    enabled: true               # scan & index reachable public endpoints for open LLMs
-    mode: "internet"            # internet (cloud AI subnets: Hetzner, DO, OVH, AWS) | ivre (local IVRE recon DB) | custom
+    enabled: false              # OFF by default. CAUTION: Outbound port scans to public IPs trigger VPS abuse filters!
+    mode: "custom"              # custom (scan explicit hosts/subnets below) | ivre (local IVRE database) | internet (caution: requires host permission)
     interval_minutes: 60        # frequency of automated port discovery
-    internet_sample_size: 150   # number of public hosts to probe per discovery cycle
-    subnets: []                 # optional custom public CIDRs (e.g. ["159.69.0.0/16", "138.68.0.0/16"])
-    hosts:                      # optional fallback/custom hosts
+    internet_sample_size: 50    # bounded sample size if internet mode is intentionally enabled
+    subnets: []                 # explicit CIDRs you have authorization to scan
+    hosts:                      # explicit targets (local lab, VPN, or owned servers)
       - "127.0.0.1"
       - "localhost"
       - "host.docker.internal"
     ports_ollama: [11434]       # default Ollama API ports
     ports_kobold: [5000, 5001, 5002] # default KoboldAI / KoboldCpp ports
     timeout: 2.0                # socket probe timeout (seconds)
-    concurrency: 32             # concurrent socket & HTTP probes
+    concurrency: 8              # conservative probe concurrency
     auto_use_for_triage: false  # auto-switch llm.base_url to fastest open Ollama/Kobold instance
-    ivre_cli_path: "ivre"       # path to IVRE CLI if running IVRE locally
+    ivre_cli_path: "ivre"       # path to IVRE CLI if querying local IVRE recon database
 
 # --- Stage 2/3 external tools (install via scripts/install_tools.py) ---
 tools:

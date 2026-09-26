@@ -75,16 +75,16 @@ class IntelligenceConfig:
 
 @dataclass
 class OnlinePortsConfig:
-    enabled: bool = True
-    mode: str = "internet"       # internet (public cloud AI subnets) | ivre (local IVRE recon DB) | custom (hosts)
+    enabled: bool = False
+    mode: str = "custom"        # custom (explicit hosts/subnets) | ivre (local IVRE recon DB) | internet
     interval_minutes: int = 60
-    internet_sample_size: int = 150
+    internet_sample_size: int = 50
     hosts: list[str] = field(default_factory=lambda: ["127.0.0.1", "localhost", "host.docker.internal"])
-    subnets: list[str] = field(default_factory=list)  # additional custom CIDRs to sweep
+    subnets: list[str] = field(default_factory=list)  # explicit authorized CIDRs
     ports_ollama: list[int] = field(default_factory=lambda: [11434])
     ports_kobold: list[int] = field(default_factory=lambda: [5000, 5001, 5002])
     timeout: float = 2.0
-    concurrency: int = 32
+    concurrency: int = 8
     auto_use_for_triage: bool = False
     ivre_cli_path: str = "ivre"
 

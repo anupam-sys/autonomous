@@ -270,17 +270,21 @@
     </div>
     <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
       <select id="port-scan-mode" style="padding: 6px 10px; background: rgba(0,0,0,0.5); border: 1px solid var(--border); color: var(--fg); font-family: inherit; font-size: 12px; border-radius: 3px;">
-        <option value="internet">🌐 INTERNET (Cloud AI Subnets)</option>
         <option value="custom">🎯 CUSTOM TARGETS / CIDRS</option>
         <option value="ivre">🦅 IVRE RECON DB</option>
+        <option value="internet">🌐 INTERNET (Cloud AI Subnets — Caution)</option>
       </select>
-      <input type="text" id="port-scan-targets" placeholder="Optional CIDRs (e.g. 159.69.0.0/16, 138.68.0.0/16)" style="width: 280px; padding: 6px 12px; background: rgba(0,0,0,0.5); border: 1px solid var(--border); color: var(--fg); font-family: inherit; font-size: 12px; border-radius: 3px;" />
+      <input type="text" id="port-scan-targets" placeholder="Hosts/CIDRs (e.g. 192.168.1.0/24, 10.0.0.1-50)" style="width: 280px; padding: 6px 12px; background: rgba(0,0,0,0.5); border: 1px solid var(--border); color: var(--fg); font-family: inherit; font-size: 12px; border-radius: 3px;" />
       <button class="btn" style="background: rgba(0, 243, 255, 0.15); border-color: var(--accent); color: var(--accent); font-weight: bold;" onclick="triggerPortScan()">⚡ SCAN & INDEX</button>
       <button class="btn" onclick="document.getElementById('port-scan-file-input').click()">📥 IMPORT SCAN</button>
       <button class="btn" onclick="exportIvreXml()">📤 EXPORT FOR IVRE</button>
       <input type="file" id="port-scan-file-input" style="display:none;" accept=".xml,.json,.txt" onchange="uploadScanFile(event)" />
       <button class="btn" onclick="pollPorts()">🔄 REFRESH</button>
     </div>
+  </div>
+
+  <div style="margin-bottom: 15px; padding: 10px 15px; background: rgba(255, 71, 87, 0.1); border: 1px solid rgba(255, 71, 87, 0.3); border-radius: 4px; font-size: 12px; color: #ff6b81;">
+    <strong>⚠️ VPS ABUSE ADVISORY:</strong> Standard cloud VPS providers (DigitalOcean, Hetzner, OVH, Linode, AWS) have automated NetScan filters that instantly suspend servers attempting outbound port scans across external public IPs. Only scan networks you own/operate, query a local IVRE database, or use <strong>IMPORT SCAN</strong> to ingest external scan files.
   </div>
 
   <div style="display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap; align-items: center;">
@@ -736,7 +740,13 @@ async function triggerPortScan() {
   const targetInp = document.getElementById('port-scan-targets');
   const modeSel = document.getElementById('port-scan-mode');
   const hosts = targetInp ? targetInp.value.trim() : '';
-  const mode = modeSel ? modeSel.value : 'internet';
+  const mode = modeSel ? modeSel.value : 'custom';
+
+  if (mode === 'internet') {
+    if (!confirm('⚠️ WARNING: Scanning external public IP ranges triggers automated VPS NetScan/abuse filters and can result in server suspension. Are you sure your hosting provider permits this?')) {
+      return;
+    }
+  }
 
   if (statusEl) {
     statusEl.textContent = mode === 'internet' 
