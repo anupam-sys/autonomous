@@ -19,12 +19,33 @@ _PLACEHOLDER_RE = re.compile(
     r"your[_\-]?\w*|insert[_\-]?|replace|todo|xxx+|\*+|qwerty|asdf)"
 )
 
-# directories never scanned here (git history is gitleaks' job)
-_SKIP_DIRS = {".git", "__pycache__", ".idea", ".vscode"}
+# directories never scanned here (dependencies, build outputs, tests, caches)
+_SKIP_DIRS = {
+    ".git", "__pycache__", ".idea", ".vscode", "node_modules", "vendor",
+    "dist", "build", "out", "target", ".next", ".nuxt", "venv", ".venv",
+    "env", ".env.example", "site-packages", "bower_components", "Pods",
+    ".gradle", ".cargo", ".tox", ".pytest_cache", ".cache", "obj", "bin",
+    "coverage", ".nyc_output", "docs", "documentation", "test", "tests",
+    "__tests__", "spec", "fixtures", "mocks", "samples", "examples",
+}
 _BINARY_EXTS = {
+    # Binaries, archives & media
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf", ".zip",
     ".jar", ".so", ".dex", ".ttf", ".woff", ".woff2", ".mp3", ".mp4",
-    ".ogg", ".otf", ".class", ".keystore",
+    ".ogg", ".otf", ".class", ".keystore", ".apk", ".aar", ".exe", ".dll",
+    ".dylib", ".tar", ".gz", ".bz2", ".7z",
+    # Generated / minified bundles & maps
+    ".min.js", ".min.css", ".map", ".bundle.js", ".chunk.js",
+    # Lock files (massive hashes with high entropy that create false positives)
+    ".lock", ".lockb",
+    # Data & translation dumps
+    ".svg", ".csv", ".tsv", ".po", ".pot", ".mo", ".xlf", ".xliff",
+    ".wasm", ".yarn", ".pack", ".idx", ".sample",
+}
+
+_SKIP_FILENAMES = {
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "cargo.lock",
+    "poetry.lock", "composer.lock", "pipfile.lock", "gemfile.lock",
 }
 
 
@@ -50,6 +71,8 @@ class Scanner:
             if _SKIP_DIRS & set(path.parts):
                 continue
             if path.suffix.lower() in _BINARY_EXTS:
+                continue
+            if path.name.lower() in _SKIP_FILENAMES:
                 continue
             try:
                 if path.stat().st_size > self._max_bytes:

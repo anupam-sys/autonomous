@@ -50,6 +50,13 @@ NOISE_TARGET_PATTERNS = [
     re.compile(r"(^|[\b_\-/])dataset", re.I),
     re.compile(r"(^|[\b_\-/])corpus", re.I),
     re.compile(r"-archive$", re.I),
+    # Additional noise: static sites, portfolios, student exercises, media
+    re.compile(r"(^|[\b_\-/])(portfolio|resume|curriculum-vitae|cv)(\b|$)", re.I),
+    re.compile(r"(^|[\b_\-/])(hugo-theme|jekyll-theme|gatsby-starter|astro-template)(\b|$)", re.I),
+    re.compile(r"(^|[\b_\-/])(freecodecamp|frontend-mentor|100-days-of-code|bootcamp)(\b|$)", re.I),
+    re.compile(r"(^|[\b_\-/])(tutorial|study|notes|handbook|guide)(\b|$)", re.I),
+    re.compile(r"(^|[\b_\-/])(spigot|paper-plugin|minecraft|roblox|unity-assets)(\b|$)", re.I),
+    re.compile(r"\.github\.io$", re.I),
 ]
 
 # System bloatware, OEM firmware apps, and non-target APKs
@@ -144,7 +151,18 @@ def evaluate_target(
     filter_forks = getattr(cfg, "filter_forks", True) if cfg else True
     min_score = getattr(cfg, "min_relevance_score", 0.25) if cfg else 0.25
 
-    # 2. Reject bot-generated spam repositories
+    # 2. Reject user profile README repositories (e.g. username/username)
+    if "/" in name_clean:
+        parts = name_clean.split("/")
+        if len(parts) == 2 and parts[0].lower() == parts[1].lower():
+            return TargetEvaluation(
+                keep=False,
+                score=0.0,
+                reason="user profile README repository (no secrets)",
+                category="profile_readme",
+            )
+
+    # 3. Reject bot-generated spam repositories
     if filter_spam:
         for pat in BOT_REPO_PATTERNS:
             if pat.search(short_name) or pat.search(name_clean):
@@ -155,7 +173,7 @@ def evaluate_target(
                     category="spam",
                 )
 
-    # 3. Reject noise / homework / media repositories
+    # 4. Reject noise / homework / media repositories
     if filter_noise:
         for pat in NOISE_TARGET_PATTERNS:
             if pat.search(name_clean):
@@ -166,7 +184,7 @@ def evaluate_target(
                     category="noise",
                 )
 
-    # 4. Reject APK bloatware / system utilities
+    # 5. Reject APK bloatware / system utilities
     if target.kind == TargetKind.APK and filter_system_apks:
         for pat in APK_BLOATWARE_PATTERNS:
             if pat.search(name_clean) or pat.search(target.locator):
@@ -238,17 +256,19 @@ def evaluate_target(
 
     # Target keywords bonus
     target_kws = getattr(cfg, "target_keywords", None)
+    has_target_kw = False
     if target_kws:
         for kw in target_kws:
             if re.search(rf"\b{re.escape(kw)}\b", eval_text):
-                bonus += 0.05
+                bonus += 0.10
+                has_target_kw = True
                 break
 
-    score = base_score + bonus
-
-    # If no signal was found and description is completely empty, apply penalty
-    if not matched_categories and not desc:
-        score -= 0.15
+    # If no relevance signal category and no target keyword matched, heavily penalize
+    if not matched_categories and not has_target_kw:
+        score = 0.10
+    else:
+        score = base_score + bonus
 
     score = max(0.0, min(1.0, score))
     primary_category = matched_categories[0] if matched_categories else "generic"
@@ -257,7 +277,7 @@ def evaluate_target(
         return TargetEvaluation(
             keep=False,
             score=round(score, 2),
-            reason=f"relevance score ({score:.2f}) < threshold ({min_score:.2f})",
+            reason=f"relevance score ({score:.2f}) < threshold ({min_score:.2f})" if matched_categories else "no security or backend signal detected",
             category=primary_category,
         )
 

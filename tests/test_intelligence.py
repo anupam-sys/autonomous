@@ -111,6 +111,30 @@ def test_dork_sources_always_kept():
     assert ev.score == 1.0
 
 
+def test_profile_readme_rejected():
+    target = Target(
+        kind=TargetKind.REPO,
+        source="github_firehose",
+        locator="https://github.com/alice/alice.git",
+        name="alice/alice",
+    )
+    ev = evaluate_target(target)
+    assert not ev.keep
+    assert ev.category == "profile_readme"
+
+
+def test_generic_unclassified_rejected():
+    target = Target(
+        kind=TargetKind.REPO,
+        source="github_firehose",
+        locator="https://github.com/someuser/my-vacation-pics.git",
+        name="someuser/my-vacation-pics",
+    )
+    ev = evaluate_target(target)
+    assert not ev.keep
+    assert "no security or backend" in ev.reason
+
+
 def test_is_scannable_member():
     # Scannable code/config files
     assert is_scannable_member("app/main.py", 1024, max_file_kb=2048)
