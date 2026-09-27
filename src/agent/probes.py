@@ -182,10 +182,10 @@ def probe_slack(token: str) -> ProbeResult:
         return ProbeResult(is_live=False, service="slack", error=f"Probe connection error: {exc}")
 
 
-def probe_url(url: str) -> ProbeResult:
-    """Safe read-only probe for exposed endpoints, strictly excluding localhost/loopback."""
+def probe_url(url: str, exclude_localhost: bool = True) -> ProbeResult:
+    """Safe read-only probe for exposed endpoints (localhost/loopback excluded by default)."""
     clean = url.strip()
-    if is_localhost(clean):
+    if exclude_localhost and is_localhost(clean):
         return ProbeResult(
             is_live=False,
             service="url",
@@ -210,12 +210,12 @@ def probe_url(url: str) -> ProbeResult:
         return ProbeResult(is_live=False, service="url", error=f"Connection failed: {exc}")
 
 
-def dispatch_probe(service: str, secret: str) -> ProbeResult:
+def dispatch_probe(service: str, secret: str, exclude_localhost: bool = True) -> ProbeResult:
     """Route credential to the appropriate safe validation probe."""
     svc = (service or "").lower().strip()
     sec = secret.strip()
 
-    if is_localhost(sec):
+    if exclude_localhost and is_localhost(sec):
         return ProbeResult(is_live=False, service=svc, error="Excluded localhost/loopback")
 
     if svc == "github" or sec.startswith(("ghp_", "gho_", "github_pat_")):

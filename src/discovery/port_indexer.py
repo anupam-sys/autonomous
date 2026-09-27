@@ -591,7 +591,10 @@ def scan_and_index_ports(
 
     # 2. IVRE DB Mode
     elif effective_mode == "ivre":
-        ivre_pairs = query_ivre_db(ports=ollama_p + kobold_p)
+        ivre_pairs = query_ivre_db(
+            ports=ollama_p + kobold_p,
+            ivre_path=getattr(cfg_online, "ivre_cli_path", "ivre") if cfg_online else "ivre",
+        )
         for h, p in ivre_pairs:
             hint = "ollama" if p in ollama_p else "kobold"
             tasks.append((h, p, hint))

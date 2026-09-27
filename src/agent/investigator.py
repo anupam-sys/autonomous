@@ -17,6 +17,11 @@ def run_agent_investigations(ctx: Any) -> dict[str, Any]:
         logger.debug("Agent investigations disabled in config (agent.enabled: false)")
         return {}
 
+    if not getattr(ctx.cfg.agent, "auto_investigate_high", True):
+        logger.debug("Automatic agent investigations disabled "
+                     "(agent.auto_investigate_high: false); manual triggers only")
+        return {}
+
     api_key = getattr(ctx.cfg.llm, "api_key", "")
     base_url = getattr(ctx.cfg.llm, "base_url", "")
     if not api_key and "localhost" not in base_url and "127.0.0.1" not in base_url:

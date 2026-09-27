@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .acquire.base import run_acquire
+from .agent import run_agent_investigations
 from .config import Config
 from .db import Database
 from .detect.base import run_scan
@@ -30,7 +31,7 @@ logger = get_logger("main")
 
 # Pipeline stages, in execution order.
 STAGES: list = [run_discovery, run_acquire, run_scan, run_triage,
-                run_ai_discovery, run_report]
+                run_agent_investigations, run_ai_discovery, run_report]
 
 
 class Context:

@@ -131,7 +131,12 @@ class Scanner:
                     continue
                 if "://" in secret and is_noise_url(secret):
                     continue
-                if rule.entropy is not None and shannon(secret) < rule.entropy:
+                # rule-level entropy floor wins; generic detectors without an
+                # explicit floor fall back to scan.entropy_threshold
+                entropy_floor = rule.entropy
+                if entropy_floor is None and rule.service == "generic":
+                    entropy_floor = self.cfg.scan.entropy_threshold
+                if entropy_floor is not None and shannon(secret) < entropy_floor:
                     continue
                 if line_offsets is None:
                     line_offsets = [i for i, c in enumerate(text) if c == "\n"]

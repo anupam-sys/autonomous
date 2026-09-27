@@ -29,7 +29,8 @@ _SKIP = (BudgetExceeded, FileTooLarge, ApkResolveFailed, CloneFailed,
 
 def run_acquire(ctx) -> dict:
     stats = {"acquired": 0, "skipped": 0, "failed": 0}
-    workers = max(1, getattr(ctx.cfg.limits, "workers", 2))
+    workers = max(1, getattr(ctx.cfg.limits, "acquire_workers",
+                             getattr(ctx.cfg.limits, "workers", 2)))
     batch = max(workers * 8, 64)
     intel_cfg = getattr(ctx.cfg.discovery, "intelligence", None)
     intel_enabled = getattr(intel_cfg, "enabled", True) if intel_cfg else True

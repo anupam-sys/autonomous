@@ -72,7 +72,6 @@ discovery:
 # --- Stage 2/3 external tools (install via scripts/install_tools.py) ---
 tools:
   jadx_path: "jadx"           # falls back to tools/jadx/bin/jadx(.bat)
-  apktool_path: "apktool"     # optional; jadx alone is sufficient
   gitleaks_path: "gitleaks"   # falls back to tools/gitleaks(.exe)
   jadx_timeout_min: 15
   jadx_extra_args: []         # e.g. ["--deobf"]

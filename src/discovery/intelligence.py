@@ -183,6 +183,18 @@ def evaluate_target(
                     reason=f"noise/homework/media pattern ({pat.pattern})",
                     category="noise",
                 )
+        # operator-configurable exclusion list (discovery.intelligence.exclude_keywords)
+        exclude_kws = getattr(cfg, "exclude_keywords", None) if cfg else None
+        if exclude_kws:
+            lowered_name = name_clean.lower()
+            for kw in exclude_kws:
+                if str(kw).lower() in lowered_name:
+                    return TargetEvaluation(
+                        keep=False,
+                        score=0.05,
+                        reason=f"excluded keyword ({kw})",
+                        category="noise",
+                    )
 
     # 5. Reject APK bloatware / system utilities
     if target.kind == TargetKind.APK and filter_system_apks:

@@ -120,7 +120,6 @@ class DiscoveryConfig:
 @dataclass
 class ToolsConfig:
     jadx_path: str = "jadx"
-    apktool_path: str = "apktool"
     gitleaks_path: str = "gitleaks"
     jadx_timeout_min: int = 15
     jadx_extra_args: list[str] = field(default_factory=list)
@@ -217,10 +216,10 @@ class Config:
         path = Path(path)
         overlay = Path(overlay)
         data: dict = {}
-        if path.exists():
+        if path.is_file():
             with path.open("r", encoding="utf-8") as fh:
                 data = yaml.safe_load(fh) or {}
-        if overlay.exists():
+        if overlay.is_file():
             with overlay.open("r", encoding="utf-8") as fh:
                 data = deep_merge(data, yaml.safe_load(fh) or {})
         cfg = _build(cls, data)
@@ -338,7 +337,7 @@ def save_overlay(updates: dict, overlay: str | Path = "config.local.yaml") -> No
     """Persist dotted-path updates into the local override file."""
     overlay = Path(overlay)
     data: dict = {}
-    if overlay.exists():
+    if overlay.is_file():
         with overlay.open("r", encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}
     for dotted, value in updates.items():

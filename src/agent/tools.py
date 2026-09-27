@@ -267,7 +267,8 @@ class AgentToolExecutor:
             if decrypted:
                 actual_secret = decrypted
 
-        res = dispatch_probe(service, actual_secret)
+        exclude_local = getattr(self.ctx.cfg.agent, "exclude_localhost", True)
+        res = dispatch_probe(service, actual_secret, exclude_localhost=exclude_local)
         return json.dumps(res.to_dict())
 
     def _draft_remediation(self, file_path: str, line: int, secret_snippet: str, env_var_name: str = "") -> str:

@@ -18,7 +18,8 @@ def run_scan(ctx) -> dict:
     rules = load_rules(ctx.cfg.paths.rules_dir)
     scanner = Scanner(ctx.cfg, rules)
     stats = {"scanned": 0, "files": 0, "findings_new": 0, "findings_dup": 0, "failed": 0}
-    workers = max(1, getattr(ctx.cfg.limits, "workers", 2))
+    workers = max(1, getattr(ctx.cfg.limits, "scan_workers",
+                             getattr(ctx.cfg.limits, "workers", 2)))
     batch = max(workers * 8, 64)
 
     targets = ctx.queue.claim(batch, status="acquired")
