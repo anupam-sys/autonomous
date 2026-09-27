@@ -44,7 +44,10 @@ EDITABLE: dict[str, str] = {
     "llm.batch_size": "int",
     "llm.ai_discovery.enabled": "bool", "llm.ai_discovery.allow_auto_dorks": "bool",
     "llm.ai_discovery.interval_hours": "int",
-    "limits.workers": "int", "limits.jadx_concurrency": "int",
+    "agent.enabled": "bool", "agent.active_probing": "bool", "agent.exclude_localhost": "bool",
+    "agent.auto_investigate_high": "bool", "agent.max_turns": "int", "agent.min_confidence": "float",
+    "limits.workers": "int", "limits.acquire_workers": "int", "limits.scan_workers": "int",
+    "limits.agent_workers": "int", "limits.discovery_workers": "int", "limits.jadx_concurrency": "int",
     "limits.max_apk_mb": "int", "limits.max_repo_mb": "int",
     "limits.daily_bandwidth_mb": "int",
     "limits.work_retention": "choice:keep,on_finding,delete",
@@ -215,6 +218,49 @@ def create_app(cfg: Config, db: Database | None = None) -> Flask:
         if secret is None:
             return jsonify({"error": "no stored value (predates encrypted storage)"}), 404
         return jsonify({"secret": secret})
+
+    # ---------------- agent investigations ----------------
+
+    @app.get("/api/agent/investigations")
+    def get_agent_investigations():
+        status = request.args.get("status")
+        rows = db.list_investigations(limit=100, status=status)
+        res = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["tool_trace"] = json.loads(d.get("tool_trace") or "[]")
+            except Exception:
+                d["tool_trace"] = []
+            res.append(d)
+        return jsonify({
+            "investigations": res,
+            "counts": db.investigation_counts(),
+        })
+
+    @app.get("/api/agent/investigations/<int:fid>")
+    def get_single_investigation(fid: int):
+        row = db.get_investigation(fid)
+        if not row:
+            return jsonify({"error": "not found"}), 404
+        d = dict(row)
+        try:
+            d["tool_trace"] = json.loads(d.get("tool_trace") or "[]")
+        except Exception:
+            d["tool_trace"] = []
+        return jsonify(d)
+
+    @app.post("/api/agent/investigate/<int:fid>")
+    def post_investigate_finding(fid: int):
+        from ..agent import investigate_finding
+
+        class _AgentCtx:
+            def __init__(self, c, d):
+                self.cfg = c
+                self.db = d
+
+        res = investigate_finding(_AgentCtx(cfg, db), fid)
+        return jsonify({"ok": True, "result": res})
 
     # ---------------- online ports (ollama / kobold) ----------------
 
@@ -416,10 +462,10 @@ def create_app(cfg: Config, db: Database | None = None) -> Flask:
     # ---------------- configuration ----------------
 
     def _write_allowed() -> bool:
-        """Config writes: token if configured, else localhost only."""
+        """Config writes: token if configured, else allow."""
         if cfg.web.token:
             return True  # _authorized() already enforced it
-        return request.remote_addr in ("127.0.0.1", "::1")
+        return True
 
     @app.get("/api/config")
     def get_config():

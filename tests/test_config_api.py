@@ -132,3 +132,21 @@ def test_config_discord_bot_settings(web_client):
     # When querying config with reveal, token is visible
     d_rev = client.get("/api/config?reveal=1").get_json()
     assert d_rev["secrets"]["notifications.discord.bot_token"] == "discord-bot-secret-token"
+
+
+def test_config_limits_and_agent_editable(web_client):
+    client, overlay = web_client
+    r = client.post("/api/config", json={"updates": {
+        "limits.acquire_workers": 24,
+        "limits.scan_workers": 12,
+        "limits.agent_workers": 6,
+        "limits.discovery_workers": 10,
+        "agent.enabled": True,
+        "agent.active_probing": True,
+        "agent.max_turns": 5,
+        "agent.min_confidence": 0.6,
+    }})
+    assert r.status_code == 200, f"Expected 200 but got {r.status_code}: {r.get_json()}"
+    text = overlay.read_text()
+    assert "acquire_workers" in text
+    assert "agent_workers" in text
