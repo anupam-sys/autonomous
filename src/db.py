@@ -14,6 +14,7 @@ import sqlite3
 import threading
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 from .models import Artifact, Finding, Target, TargetKind
 
@@ -125,6 +126,20 @@ CREATE TABLE IF NOT EXISTS indexed_ports (
 );
 CREATE INDEX IF NOT EXISTS idx_indexed_ports_online ON indexed_ports(is_online, is_open);
 CREATE INDEX IF NOT EXISTS idx_indexed_ports_service ON indexed_ports(service_type);
+
+CREATE TABLE IF NOT EXISTS agent_investigations (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    finding_id      INTEGER NOT NULL REFERENCES findings(id),
+    status          TEXT NOT NULL,          -- verified_live | false_positive_mock | revoked | unverified | error
+    blast_radius    TEXT NOT NULL DEFAULT '',
+    summary         TEXT NOT NULL DEFAULT '',
+    patch_diff      TEXT,
+    tool_trace      TEXT NOT NULL DEFAULT '[]', -- JSON array of tool calls & outputs
+    completed_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(finding_id)
+);
+CREATE INDEX IF NOT EXISTS idx_investigations_finding ON agent_investigations(finding_id);
+CREATE INDEX IF NOT EXISTS idx_investigations_status ON agent_investigations(status);
 """
 
 
@@ -132,17 +147,25 @@ class Database:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.key_path = self.path.parent / "secret.key"
+        from . import crypto_vault
+
+        crypto_vault.configure(self.key_path)
+
         self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
+        self._conn.execute("PRAGMA synchronous = NORMAL")
+        self._conn.execute("PRAGMA busy_timeout = 30000")
+        self._conn.execute("PRAGMA cache_size = -64000")
         self._lock = threading.RLock()
         with self._lock, self._conn:
             self._conn.executescript(SCHEMA)
             self._migrate()
 
     def _migrate(self) -> None:
-        """Add columns and tables introduced after the initial schema."""
+        """Add columns introduced after the initial schema for existing databases."""
         cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(findings)")}
         if "secret_enc" not in cols:
             self._conn.execute("ALTER TABLE findings ADD COLUMN secret_enc BLOB")
@@ -150,29 +173,6 @@ class Database:
         if "priority" not in tcols:
             self._conn.execute("ALTER TABLE targets ADD COLUMN priority REAL NOT NULL DEFAULT 0.0")
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_targets_priority ON targets(status, priority DESC)")
-        tables = {r["name"] for r in self._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        if "indexed_ports" not in tables:
-            self._conn.executescript("""
-                CREATE TABLE IF NOT EXISTS indexed_ports (
-                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                    host            TEXT NOT NULL,
-                    port            INTEGER NOT NULL,
-                    service_type    TEXT NOT NULL,
-                    url             TEXT NOT NULL,
-                    api_url         TEXT NOT NULL,
-                    is_online       INTEGER NOT NULL DEFAULT 0,
-                    is_open         INTEGER NOT NULL DEFAULT 0,
-                    models          TEXT NOT NULL DEFAULT '[]',
-                    latency_ms      REAL NOT NULL DEFAULT 0.0,
-                    version_info    TEXT NOT NULL DEFAULT '',
-                    source          TEXT NOT NULL DEFAULT 'port_scan',
-                    last_checked    TEXT NOT NULL DEFAULT (datetime('now')),
-                    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-                    UNIQUE(host, port, service_type)
-                );
-                CREATE INDEX IF NOT EXISTS idx_indexed_ports_online ON indexed_ports(is_online, is_open);
-                CREATE INDEX IF NOT EXISTS idx_indexed_ports_service ON indexed_ports(service_type);
-            """)
 
     def close(self) -> None:
         with self._lock:
@@ -299,14 +299,31 @@ class Database:
 
         The full secret value (f.secret_full) is stored ONLY Fernet-encrypted
         in secret_enc — never in plaintext. Duplicates update last_seen and
-        backfill secret_enc if the existing row lacks it.
+        only encrypt if backfilling a missing secret_enc.
         """
         from . import crypto_vault
 
-        enc = crypto_vault.encrypt(f.secret_full) if f.secret_full else None
         with self._lock, self._conn:
+            existing = self._conn.execute(
+                "SELECT id, secret_enc FROM findings WHERE secret_hash = ? AND target_id = ? AND file_path = ? AND line = ?",
+                (f.secret_hash, f.target_id, f.file_path, f.line),
+            ).fetchone()
+            if existing:
+                enc = None
+                if f.secret_full and existing["secret_enc"] is None:
+                    enc = crypto_vault.encrypt(f.secret_full, self.key_path)
+                self._conn.execute(
+                    """UPDATE findings SET last_seen = datetime('now'),
+                         secret_enc = COALESCE(secret_enc, ?)
+                       WHERE id = ?""",
+                    (enc, existing["id"]),
+                )
+                f.id = existing["id"]
+                return False
+
+            enc = crypto_vault.encrypt(f.secret_full, self.key_path) if f.secret_full else None
             cur = self._conn.execute(
-                """INSERT OR IGNORE INTO findings
+                """INSERT INTO findings
                    (target_id, detector, service, secret_type, file_path, line,
                     secret_preview, secret_hash, secret_enc, context, severity,
                     confidence, triage_status)
@@ -327,20 +344,10 @@ class Database:
                     f.triage_status.value,
                 ),
             )
-            if cur.rowcount == 0:
-                self._conn.execute(
-                    """UPDATE findings SET last_seen = datetime('now'),
-                         secret_enc = COALESCE(secret_enc, ?)
-                       WHERE secret_hash = ? AND target_id = ?
-                         AND file_path = ? AND line = ?""",
-                    (enc, f.secret_hash, f.target_id, f.file_path, f.line),
-                )
-                return False
             f.id = cur.lastrowid
             return True
 
     def get_finding(self, finding_id: int) -> sqlite3.Row | None:
-        """Get a single finding by ID, joined with target details."""
         with self._lock:
             return self._conn.execute(
                 """SELECT f.*, t.name AS target_name, t.kind AS target_kind,
@@ -360,7 +367,7 @@ class Database:
             ).fetchone()
         if not row or row["secret_enc"] is None:
             return None
-        return crypto_vault.decrypt(row["secret_enc"])
+        return crypto_vault.decrypt(row["secret_enc"], self.key_path)
 
     def untriaged_findings(
         self, min_confidence: float, limit: int
@@ -390,18 +397,23 @@ class Database:
                 (status, notes, confidence, finding_id),
             )
 
-    def findings_for_report(self, min_severity_rank: int = 0) -> list[sqlite3.Row]:
+    def findings_for_report(self, max_severity_rank: int | None = None) -> list[sqlite3.Row]:
+        sql = """SELECT f.*, t.name AS target_name, t.kind AS target_kind,
+                        t.locator AS target_locator, t.source AS target_source
+                 FROM findings f JOIN targets t ON t.id = f.target_id """
+        params: list[Any] = []
+        if max_severity_rank is not None:
+            sql += """WHERE (CASE f.severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1
+                                           WHEN 'medium' THEN 2 WHEN 'low' THEN 3
+                                           ELSE 4 END) <= ? """
+            params.append(max_severity_rank)
+        sql += """ORDER BY
+                   CASE f.severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1
+                                   WHEN 'medium' THEN 2 WHEN 'low' THEN 3
+                                   ELSE 4 END,
+                   f.confidence DESC"""
         with self._lock:
-            return self._conn.execute(
-                """SELECT f.*, t.name AS target_name, t.kind AS target_kind,
-                          t.locator AS target_locator, t.source AS target_source
-                   FROM findings f JOIN targets t ON t.id = f.target_id
-                   ORDER BY
-                     CASE f.severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1
-                                     WHEN 'medium' THEN 2 WHEN 'low' THEN 3
-                                     ELSE 4 END,
-                     f.confidence DESC"""
-            ).fetchall()
+            return self._conn.execute(sql, params).fetchall()
 
     # ---------------- llm suggestions ----------------
 
@@ -640,6 +652,96 @@ class Database:
                 "kobold": kobold,
             }
 
+    # ---------------- agent investigations ----------------
+
+    def upsert_investigation(
+        self,
+        finding_id: int,
+        status: str,
+        blast_radius: str = "",
+        summary: str = "",
+        patch_diff: str | None = None,
+        tool_trace: list | str = "[]",
+    ) -> int:
+        trace_json = tool_trace if isinstance(tool_trace, str) else json.dumps(tool_trace, default=str)
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                """INSERT INTO agent_investigations
+                   (finding_id, status, blast_radius, summary, patch_diff, tool_trace, completed_at)
+                   VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+                   ON CONFLICT(finding_id) DO UPDATE SET
+                       status = excluded.status,
+                       blast_radius = excluded.blast_radius,
+                       summary = excluded.summary,
+                       patch_diff = excluded.patch_diff,
+                       tool_trace = excluded.tool_trace,
+                       completed_at = datetime('now')""",
+                (finding_id, status, blast_radius, summary, patch_diff, trace_json),
+            )
+            return cur.lastrowid
+
+    def get_investigation(self, finding_id: int) -> sqlite3.Row | None:
+        with self._lock, self._conn:
+            return self._conn.execute(
+                """SELECT ai.*, f.detector, f.service, f.file_path, f.line, f.secret_preview,
+                          f.severity, f.context, t.name as target_name, t.kind as target_kind
+                   FROM agent_investigations ai
+                   JOIN findings f ON ai.finding_id = f.id
+                   JOIN targets t ON f.target_id = t.id
+                   WHERE ai.finding_id = ?""",
+                (finding_id,),
+            ).fetchone()
+
+    def list_investigations(
+        self, limit: int = 100, status: str | None = None
+    ) -> list[sqlite3.Row]:
+        query = (
+            "SELECT ai.*, f.detector, f.service, f.file_path, f.line, f.secret_preview, "
+            "f.severity, t.name as target_name, t.kind as target_kind "
+            "FROM agent_investigations ai "
+            "JOIN findings f ON ai.finding_id = f.id "
+            "JOIN targets t ON f.target_id = t.id "
+        )
+        params: list[Any] = []
+        if status:
+            query += " WHERE ai.status = ?"
+            params.append(status)
+        query += " ORDER BY ai.id DESC LIMIT ?"
+        params.append(limit)
+        with self._lock, self._conn:
+            return self._conn.execute(query, params).fetchall()
+
+    def untriaged_findings_for_agent(
+        self, min_confidence: float = 0.5, limit: int = 100
+    ) -> list[sqlite3.Row]:
+        with self._lock, self._conn:
+            return self._conn.execute(
+                """SELECT f.*, t.name AS target_name, t.kind AS target_kind, t.locator AS target_locator
+                   FROM findings f
+                   JOIN targets t ON f.target_id = t.id
+                   WHERE f.confidence >= ?
+                     AND f.id NOT IN (SELECT finding_id FROM agent_investigations)
+                   ORDER BY CASE f.severity
+                       WHEN 'critical' THEN 1
+                       WHEN 'high' THEN 2
+                       WHEN 'medium' THEN 3
+                       ELSE 4
+                   END, f.id DESC
+                   LIMIT ?""",
+                (min_confidence, limit),
+            ).fetchall()
+
+    def investigation_counts(self) -> dict[str, Any]:
+        with self._lock, self._conn:
+            total = self._conn.execute("SELECT COUNT(*) FROM agent_investigations").fetchone()[0]
+            by_status = {
+                r["status"]: r["n"]
+                for r in self._conn.execute(
+                    "SELECT status, COUNT(*) AS n FROM agent_investigations GROUP BY status"
+                )
+            }
+            return {"total": total, "by_status": by_status}
+
     # ---------------- stats ----------------
 
     def counts(self) -> dict:
@@ -660,11 +762,13 @@ class Database:
                 "SELECT COUNT(*) AS n FROM llm_suggestions WHERE status = 'pending'"
             ).fetchone()["n"]
             ports_stats = self.indexed_port_counts()
+            investigations = self.investigation_counts()
         return {
             "targets_by_status": targets,
             "findings_total": findings,
             "findings_pending_triage": pending_triage,
             "suggestions_pending": suggestions,
             "indexed_ports": ports_stats,
+            "agent_investigations": investigations,
             "bandwidth_today_mb": round(self.bandwidth_today() / 1e6, 1),
         }

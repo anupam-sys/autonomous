@@ -132,7 +132,7 @@ def _heartbeat_loop(ctx: "Context", stop: threading.Event, shared: dict) -> None
             logger.info("%s", msg)
             emit(ctx, "heartbeat", msg)  # dashboard liveness pulse
         except Exception:
-            pass
+            logger.debug("heartbeat loop iteration error", exc_info=True)
 
 
 def cmd_run(cfg: Config, once: bool) -> None:
@@ -292,6 +292,9 @@ def main() -> None:
 
     cfg = Config.load(args.config)
     setup_logging(cfg.log_level)
+    from . import crypto_vault
+
+    crypto_vault.configure(Path(cfg.paths.data_dir) / "secret.key")
 
     if args.command == "init":
         cmd_init(cfg)

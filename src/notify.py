@@ -101,6 +101,29 @@ def notify_finding(ctx, finding: dict, triage_status: str, triage_notes: str | N
         logger.warning("Discord webhook failed: %s", exc)
 
 
+def maybe_notify_raw_finding(ctx, finding, target, stage: str = "pending") -> None:
+    """Notify finding if discord notifications are configured for raw/pre-triage alerts."""
+    discord = getattr(ctx.cfg.notifications, "discord", None)
+    if not discord or not discord.enabled:
+        return
+    if discord.notify_on not in ("any", "high_severity"):
+        return
+
+    notify_dict = {
+        "id": finding.id,
+        "severity": finding.severity,
+        "detector": finding.detector,
+        "service": finding.service,
+        "target_name": target.name,
+        "target_kind": target.kind.value if hasattr(target.kind, "value") else str(target.kind),
+        "file_path": finding.file_path,
+        "line": finding.line,
+        "secret_preview": finding.secret_preview,
+        "secret_full": getattr(finding, "secret_full", None),
+    }
+    notify_finding(ctx, notify_dict, stage)
+
+
 def notify_report(ctx, report_result: dict) -> None:
     """Send generated report files (HTML + JSON) through Discord bot or webhook."""
     discord = ctx.cfg.notifications.discord

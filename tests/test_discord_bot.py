@@ -208,31 +208,37 @@ async def test_bot_post_finding_alert_with_thread(cfg, db):
         "secret_full": "AKIAIOSFODNN7EXAMPLE",
     }
 
-    sent_msg = await bot.post_finding_alert(finding, "pending")
-    assert sent_msg == mock_msg
-    assert mock_channel.send.called
-    call_kwargs = mock_channel.send.call_args[1]
-    embed = call_kwargs["embed"]
-    assert "aws-access-key" in embed.title
-    assert "AKIAIOSFODNN7EXAMPLE" in embed.fields[5].value
+    try:
+        sent_msg = await bot.post_finding_alert(finding, "pending")
+        assert sent_msg == mock_msg
+        assert mock_channel.send.called
+        call_kwargs = mock_channel.send.call_args[1]
+        embed = call_kwargs["embed"]
+        assert "aws-access-key" in embed.title
+        assert "AKIAIOSFODNN7EXAMPLE" in embed.fields[5].value
 
-    # Verify thread was created
-    assert mock_msg.create_thread.called
-    assert bot._thread_findings[mock_thread.id] == 101
+        # Verify thread was created
+        assert mock_msg.create_thread.called
+        assert bot._thread_findings[mock_thread.id] == 101
+    finally:
+        await bot.close()
 
 
-def test_bot_authorized_users(cfg):
+@pytest.mark.anyio
+async def test_bot_authorized_users(cfg):
     cfg.notifications.discord.authorized_users = [111, 222]
     ctx = DummyContext(cfg, None)
     bot = FasDiscordBot(ctx)
+    try:
+        assert bot.is_authorized(111) is True
+        assert bot.is_authorized(222) is True
+        assert bot.is_authorized(999) is False
 
-    assert bot.is_authorized(111) is True
-    assert bot.is_authorized(222) is True
-    assert bot.is_authorized(999) is False
-
-    # Empty list means unrestricted
-    cfg.notifications.discord.authorized_users = []
-    assert bot.is_authorized(999) is True
+        # Empty list means unrestricted
+        cfg.notifications.discord.authorized_users = []
+        assert bot.is_authorized(999) is True
+    finally:
+        await bot.close()
 
 
 def test_scan_target_on_demand_repo(cfg, db, tmp_path):
@@ -276,7 +282,16 @@ async def test_bot_post_report_alert(cfg, db, tmp_path):
         "json": str(json_f),
     }
 
-    msg = await bot.post_report_alert(report_data)
+    try:
+        msg = await bot.post_report_alert(report_data)
+        assert msg == mock_msg
+        assert mock_channel.send.called
+        kwargs = mock_channel.send.call_args[1]
+        embed = kwargs["embed"]
+        assert "Security Findings Report" in embed.title
+        assert len(kwargs["files"]) == 2
+    finally:
+        await bot.close()
     assert msg == mock_msg
     assert mock_channel.send.called
     kwargs = mock_channel.send.call_args[1]

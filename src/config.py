@@ -19,12 +19,26 @@ class PathsConfig:
 
 @dataclass
 class LimitsConfig:
-    workers: int = 8
+    workers: int = 8                    # fallback general concurrency
+    acquire_workers: int = 16           # concurrent network clones & downloads
+    scan_workers: int = 8               # concurrent filesystem & regex scans
+    agent_workers: int = 4              # concurrent autonomous agent investigation threads
+    discovery_workers: int = 8          # concurrent discovery source runners
     jadx_concurrency: int = 4
     max_apk_mb: int = 300
     max_repo_mb: int = 500
     daily_bandwidth_mb: int = 51200
     work_retention: str = "on_finding"  # keep | on_finding | delete
+
+
+@dataclass
+class AgentConfig:
+    enabled: bool = True
+    active_probing: bool = True         # safe non-destructive read-only identity verification
+    exclude_localhost: bool = True      # strictly exclude localhost & loopback
+    max_turns: int = 4                  # maximum tool turns per investigation
+    auto_investigate_high: bool = True  # auto-run agent on high & critical findings
+    min_confidence: float = 0.5         # minimum rule confidence for agent analysis
 
 
 @dataclass
@@ -94,6 +108,7 @@ class DiscoveryConfig:
     interval_minutes: int = 60
     firehose_enabled: bool = True
     gitlab_enabled: bool = True
+    gitlab_token: str = ""
     bitbucket_enabled: bool = False
     github_recent: GithubRecentConfig = field(default_factory=GithubRecentConfig)
     registries: RegistriesConfig = field(default_factory=RegistriesConfig)
@@ -183,9 +198,11 @@ class Config:
     tools: ToolsConfig = field(default_factory=ToolsConfig)
     scan: ScanConfig = field(default_factory=ScanConfig)
     llm: LlmConfig = field(default_factory=LlmConfig)
+    agent: AgentConfig = field(default_factory=AgentConfig)
     report: ReportConfig = field(default_factory=ReportConfig)
     web: WebConfig = field(default_factory=WebConfig)
     notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
+    gitlab_token: str = ""
     log_level: str = "INFO"
 
     @classmethod
@@ -227,7 +244,8 @@ class Config:
         if env.get("LLM_MODEL"):
             self.llm.model = env["LLM_MODEL"]
         if env.get("GITLAB_TOKEN"):
-            self.gitlab_token = env["GITLAB_TOKEN"]  # consumed by gitlab source
+            self.gitlab_token = env["GITLAB_TOKEN"]
+            self.discovery.gitlab_token = env["GITLAB_TOKEN"]
         if env.get("DISCORD_ENABLED"):
             self.notifications.discord.enabled = env["DISCORD_ENABLED"].lower() in ("1", "true", "yes")
         if env.get("DISCORD_WEBHOOK_URL"):
@@ -252,6 +270,15 @@ class Config:
             self.discovery.online_ports.hosts = [h.strip() for h in env["ONLINE_PORTS_HOSTS"].split(",") if h.strip()]
         if env.get("ONLINE_PORTS_SUBNETS"):
             self.discovery.online_ports.subnets = [s.strip() for s in env["ONLINE_PORTS_SUBNETS"].split(",") if s.strip()]
+        if env.get("AGENT_ENABLED"):
+            self.agent.enabled = env["AGENT_ENABLED"].lower() in ("1", "true", "yes")
+        if env.get("AGENT_ACTIVE_PROBING"):
+            self.agent.active_probing = env["AGENT_ACTIVE_PROBING"].lower() in ("1", "true", "yes")
+        if env.get("AGENT_MAX_TURNS"):
+            try:
+                self.agent.max_turns = int(env["AGENT_MAX_TURNS"])
+            except ValueError:
+                pass
 
     def ensure_dirs(self) -> None:
         Path(self.paths.data_dir).mkdir(parents=True, exist_ok=True)

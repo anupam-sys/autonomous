@@ -22,9 +22,11 @@ class Rule:
     entropy: float | None = None
     group: int | None = None
     pattern: re.Pattern = field(init=False, repr=False)
+    keywords_lower: list[str] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.pattern = re.compile(self.regex)
+        self.keywords_lower = [k.lower() for k in (self.keywords or [])]
 
 
 def load_rules(rules_dir: str | Path) -> list[Rule]:

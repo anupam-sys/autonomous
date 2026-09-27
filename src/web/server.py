@@ -29,6 +29,7 @@ logger = get_logger("web")
 SECRET_PATHS = {
     "llm.api_key",
     "discovery.github_recent.token",
+    "discovery.gitlab_token",
     "web.token",
     "notifications.discord.webhook_url",
     "notifications.discord.bot_token",
@@ -48,7 +49,8 @@ EDITABLE: dict[str, str] = {
     "limits.daily_bandwidth_mb": "int",
     "limits.work_retention": "choice:keep,on_finding,delete",
     "discovery.interval_minutes": "int", "discovery.firehose_enabled": "bool",
-    "discovery.gitlab_enabled": "bool", "discovery.bitbucket_enabled": "bool",
+    "discovery.gitlab_enabled": "bool", "discovery.gitlab_token": "secret",
+    "discovery.bitbucket_enabled": "bool",
     "discovery.github_recent.enabled": "bool",
     "discovery.github_recent.token": "secret",
     "discovery.github_recent.per_page": "int",

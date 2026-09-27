@@ -45,6 +45,10 @@ def start_discord_bot(ctx: Any) -> FasDiscordBot | None:
         except Exception as exc:
             logger.warning("Discord bot stopped: %s", exc)
         finally:
+            try:
+                loop.run_until_complete(bot.close())
+            except Exception:
+                pass
             loop.close()
 
     _bot_thread = threading.Thread(target=_runner, daemon=True, name="DiscordBotThread")

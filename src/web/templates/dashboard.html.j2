@@ -232,6 +232,7 @@
 <nav class="tabs">
   <button class="active" data-pane="activity">SYSTEM LOG</button>
   <button data-pane="findings">ANOMALY REPORTS</button>
+  <button data-pane="agent">AGENT INVESTIGATIONS</button>
   <button data-pane="sources">DIAGNOSTICS</button>
   <button data-pane="suggestions">NEURAL SUGGESTIONS</button>
   <button data-pane="ports">ONLINE LLM PORTS</button>
@@ -245,6 +246,23 @@
     <th>SEV</th><th>ORIGIN</th><th>SCANNER</th><th>STATUS</th><th>TARGET ID</th>
     <th>COORDINATES</th><th>TRACE PREVIEW</th><th>DEEP CONTEXT</th>
   </tr></thead><tbody id="findings-body"></tbody></table>
+</div>
+
+<div class="pane" id="pane-agent">
+  <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 15px; margin-bottom: 20px; padding: 15px 20px; background: var(--panel-bg); border: 1px solid var(--border); border-radius: 4px;">
+    <div>
+      <h2 style="font-size: 16px; color: var(--accent); margin-bottom: 4px;">AUTONOMOUS AGENT INVESTIGATION & SAFE PROBING</h2>
+      <p class="meta" style="margin: 0;">
+        Multi-turn autonomous ReAct agent: deep codebase context inspection, git commit history tracking, test mock classification, and safe read-only identity verification.
+      </p>
+    </div>
+    <div id="agent-counts" style="font-family: var(--font-head); font-size: 13px; color: var(--accent);">
+      0 INVESTIGATED
+    </div>
+  </div>
+  <table><thead><tr>
+    <th>ID</th><th>VERDICT</th><th>BLAST RADIUS</th><th>TARGET & COORDINATES</th><th>EXECUTIVE SUMMARY</th><th>ACTIONS & TRACE</th>
+  </tr></thead><tbody id="agent-body"></tbody></table>
 </div>
 
 <div class="pane" id="pane-sources">
@@ -410,7 +428,11 @@ async function pollFindings() {
     <td>${esc(f.target_name)}<br><small style="color:var(--dim)">${esc(f.target_kind)}</small></td>
     <td><code>${esc(f.file_path)}:${f.line}</code></td>
     <td><code id="prev-${f.id}">${esc(f.secret_preview)}</code>
-      <button class="btn" style="margin-left: 10px;" onclick="reveal(${f.id})">DECRYPT</button></td>
+      <div style="margin-top: 5px; display: flex; gap: 4px;">
+        <button class="btn" style="padding: 4px 8px; font-size: 10px;" onclick="reveal(${f.id})">DECRYPT</button>
+        <button class="btn" style="padding: 4px 8px; font-size: 10px; color: var(--green); border-color: var(--green);" onclick="triggerInvestigation(${f.id}, this)">⚡ INVESTIGATE</button>
+      </div>
+    </td>
     <td><details><summary>EXPAND</summary><pre>${esc(f.context)}</pre></details></td>
   </tr>`).join('');
 }
@@ -454,8 +476,79 @@ async function reveal(id) {
   cell.style.border = '1px solid var(--gold)';
 }
 
+async function pollAgentInvestigations() {
+  try {
+    const d = await (await fetch(url('/api/agent/investigations'))).json();
+    const rows = d.investigations || [];
+    const cnt = d.counts || {};
+    const statusEl = document.getElementById('agent-counts');
+    if (statusEl) {
+      statusEl.innerHTML = `<span style="color:var(--green)">${cnt.by_status?.verified_live || 0} LIVE</span> // ${cnt.total || 0} INVESTIGATED`;
+    }
+    const body = document.getElementById('agent-body');
+    if (!body) return;
+    if (!rows.length) {
+      body.innerHTML = `<tr><td colspan="6" style="text-align:center; color:var(--dim); padding:20px;">No agent investigations recorded yet. Click "⚡ INVESTIGATE" on any finding or let the autonomous daemon run.</td></tr>`;
+      return;
+    }
+    body.innerHTML = rows.map(r => {
+      let badgeClass = 'placeholder';
+      if (r.status === 'verified_live') badgeClass = 'true_positive';
+      else if (r.status === 'false_positive_mock') badgeClass = 'false_positive';
+      return `<tr>
+        <td>#${r.finding_id}</td>
+        <td><span class="pill ${badgeClass}">${esc(r.status.toUpperCase())}</span></td>
+        <td><strong style="color:var(--accent);">${esc(r.blast_radius || 'None')}</strong></td>
+        <td>${esc(r.target_name)}<br><code>${esc(r.file_path)}:${r.line}</code></td>
+        <td style="max-width:320px; font-size:12px;">${esc(r.summary)}</td>
+        <td>
+          <details><summary>VIEW TRACE & DIFF</summary>
+            ${r.patch_diff ? `<h4 style="margin-top:8px; color:var(--gold);">REMEDIATION PATCH</h4><pre>${esc(r.patch_diff)}</pre>` : ''}
+            <h4 style="margin-top:8px; color:var(--accent);">TOOL EXECUTION TRACE (${(r.tool_trace||[]).length} turns)</h4>
+            <pre>${esc(JSON.stringify(r.tool_trace || [], null, 2))}</pre>
+          </details>
+        </td>
+      </tr>`;
+    }).join('');
+  } catch (err) {
+    console.debug("pollAgentInvestigations error:", err);
+  }
+}
+
+async function triggerInvestigation(fid, btn) {
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '⏳ RUNNING...';
+  }
+  try {
+    const res = await (await fetch(url('/api/agent/investigate/' + fid), {method: 'POST'})).json();
+    if (res.ok) {
+      alert(`Agent Investigation Completed for Finding #${fid}:\nStatus: ${res.result.status.toUpperCase()}\nBlast Radius: ${res.result.blast_radius || 'None'}\n\n${res.result.summary}`);
+      pollAgentInvestigations();
+      pollFindings();
+    } else {
+      alert(`Investigation failed: ${res.error || 'Unknown error'}`);
+    }
+  } catch (err) {
+    alert(`Request error: ${err}`);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = '⚡ INVESTIGATE';
+    }
+  }
+}
+
 /* ---------------- config tab ---------------- */
 const CFG_SECTIONS = [
+  ['AUTONOMOUS AGENT & SAFE PROBING', [
+    ['agent.enabled', 'bool', 'ENABLE AUTONOMOUS AGENT'],
+    ['agent.active_probing', 'bool', 'SAFE READ-ONLY PROBING (AWS/GITHUB/STRIPE)'],
+    ['agent.exclude_localhost', 'bool', 'EXCLUDE LOCALHOST/LOOPBACK'],
+    ['agent.auto_investigate_high', 'bool', 'AUTO-INVESTIGATE HIGH/CRITICAL FINDINGS'],
+    ['agent.max_turns', 'int', 'MAX TOOL TURNS PER FINDING'],
+    ['agent.min_confidence', 'float', 'MIN CONFIDENCE FLOOR'],
+  ]],
   ['NEURAL NETWORK — TRIAGE & AI DISCOVERY', [
     ['llm.enabled', 'bool', 'ENABLE LLM TRIAGE'],
     ['llm.base_url', 'str', 'BASE ENDPOINT URL'],
@@ -469,8 +562,12 @@ const CFG_SECTIONS = [
     ['llm.ai_discovery.allow_auto_dorks', 'bool', 'AUTO-DEPLOY AI DORKS'],
     ['llm.ai_discovery.interval_hours', 'int', 'DISCOVERY INTERVAL (H)'],
   ]],
-  ['SYSTEM LIMITS', [
-    ['limits.workers', 'int', 'ACQUIRE THREADS/CYCLE'],
+  ['SYSTEM CONCURRENCY & LIMITS (VPS TUNED)', [
+    ['limits.acquire_workers', 'int', 'ACQUIRE CONCURRENCY (CLONES & DOWNLOADS)'],
+    ['limits.scan_workers', 'int', 'SCAN CONCURRENCY (REGEX & ENTROPY)'],
+    ['limits.agent_workers', 'int', 'AGENT CONCURRENCY (PARALLEL INVESTIGATIONS)'],
+    ['limits.discovery_workers', 'int', 'DISCOVERY CONCURRENCY (SOURCES)'],
+    ['limits.workers', 'int', 'GENERAL WORKERS FALLBACK'],
     ['limits.jadx_concurrency', 'int', 'JADX PARALLELISM'],
     ['limits.max_apk_mb', 'int', 'MAX APK SIZE (MB)'],
     ['limits.max_repo_mb', 'int', 'MAX REPO SIZE (MB)'],
@@ -860,15 +957,18 @@ document.querySelectorAll('nav.tabs button').forEach(b =>
       loadConfig();
     } else if (b.dataset.pane === 'ports') {
       pollPorts();
+    } else if (b.dataset.pane === 'agent') {
+      pollAgentInvestigations();
     }
   }));
 
 function set(id, v) { document.getElementById(id).textContent = v; }
 
-pollState(); pollEvents(); pollFindings(); pollRuns(); pollSuggestions(); pollPorts(); loadConfig();
+pollState(); pollEvents(); pollFindings(); pollAgentInvestigations(); pollRuns(); pollSuggestions(); pollPorts(); loadConfig();
 setInterval(pollState, 4000);
 setInterval(pollEvents, 2000);
 setInterval(pollFindings, 15000);
+setInterval(pollAgentInvestigations, 15000);
 setInterval(pollRuns, 30000);
 setInterval(pollSuggestions, 30000);
 setInterval(pollPorts, 15000);

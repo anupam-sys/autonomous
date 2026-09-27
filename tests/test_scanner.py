@@ -45,9 +45,20 @@ def test_localhost_urls_suppressed(scanner):
 
 
 def test_is_placeholder():
+    # Obvious placeholders
     assert is_placeholder("aaaaaaaaaaaaaa")
     assert is_placeholder("your_api_key")
+    assert is_placeholder("dummy-secret-token")
+    assert is_placeholder("<YOUR_KEY>")
+    assert is_placeholder("test")
+    assert is_placeholder("changeme")
+
+    # Real keys containing test / demo / fake / xxx as substrings must NOT be dropped!
     assert not is_placeholder("aB3dE5fG7hI9jK1l")
+    assert not is_placeholder("AKIAIOSFODNN7xXxTest123")
+    assert not is_placeholder("sk_live_51HxFakeKey9234810234")
+    assert not is_placeholder("ghp_demoTokenWithRandomBytes92834")
+    assert not is_placeholder("glpat-xxxSecretToken991823746")
 
 
 def test_noise_url():

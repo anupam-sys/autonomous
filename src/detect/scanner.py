@@ -14,9 +14,25 @@ from .url_filter import is_noise_url
 logger = get_logger("detect.scanner")
 
 # obvious dummies — checked against the matched secret itself
-_PLACEHOLDER_RE = re.compile(
-    r"(?i)(example|sample|dummy|test|demo|fake|placeholder|changeme|"
-    r"your[_\-]?\w*|insert[_\-]?|replace|todo|xxx+|\*+|qwerty|asdf)"
+_DUMMY_EXACT = {
+    "example", "sample", "dummy", "test", "demo", "fake", "placeholder",
+    "changeme", "change_me", "replace_me", "todo", "qwerty", "asdf",
+    "password", "secret", "mysecret", "admin", "null", "undefined",
+    "none", "true", "false", "your_api_key", "your_token", "api_key",
+}
+
+_PLACEHOLDER_PATTERNS = (
+    # Template markers like <API_KEY>, [YOUR_KEY], {SECRET}, $(TOKEN)
+    re.compile(r"^(?:<.*>|\[.*\]|\{.*\}|\$\(.*\))$"),
+    # Obvious prefixes like your-key, insert-key, replace-with-key
+    re.compile(r"^(?:your|insert|replace|enter)[_\-\s]?\w*$", re.IGNORECASE),
+    # Obvious prefix/suffix words separated by delimiter: e.g. test_key, dummy-secret, my_fake_token
+    re.compile(r"^(?:example|sample|dummy|test|demo|fake|placeholder)[_\-\.][\w\.\-]+$", re.IGNORECASE),
+    re.compile(r"^[\w\.\-]+[_\-\.](?:example|sample|dummy|test|demo|fake|placeholder)$", re.IGNORECASE),
+    # Common doc examples like AKIAIOSFODNN7EXAMPLE
+    re.compile(r"example$", re.IGNORECASE),
+    # Masked dummy filler runs: XXXX+, ****+, ____+
+    re.compile(r"(?:[xX]{4,}|\*{3,}|_{4,})"),
 )
 
 # directories never scanned here (dependencies, build outputs, tests, caches)
@@ -50,9 +66,13 @@ _SKIP_FILENAMES = {
 
 
 def is_placeholder(secret: str) -> bool:
-    if len(set(secret)) <= 3:  # aaaaaa / ababab / 111111
+    clean = secret.strip().strip("'\"`")
+    if len(set(clean)) <= 3:  # aaaaaa / ababab / 111111 / *******
         return True
-    return bool(_PLACEHOLDER_RE.search(secret))
+    lowered = clean.lower()
+    if lowered in _DUMMY_EXACT:
+        return True
+    return any(p.search(clean) for p in _PLACEHOLDER_PATTERNS)
 
 
 class Scanner:
@@ -93,10 +113,14 @@ class Scanner:
         return findings, files
 
     def scan_text(self, text: str, rel_path: str, target_id: int) -> list[Finding]:
+        import bisect
+
         out: list[Finding] = []
         lowered = text.lower()
+        line_offsets: list[int] | None = None
         for rule in self.rules:
-            if rule.keywords and not any(k.lower() in lowered for k in rule.keywords):
+            keywords = getattr(rule, "keywords_lower", None) or [k.lower() for k in rule.keywords]
+            if keywords and not any(k in lowered for k in keywords):
                 continue
             for m in rule.pattern.finditer(text):
                 secret = m.group(rule.group) if rule.group else m.group(0)
@@ -109,7 +133,9 @@ class Scanner:
                     continue
                 if rule.entropy is not None and shannon(secret) < rule.entropy:
                     continue
-                line = text.count("\n", 0, m.start()) + 1
+                if line_offsets is None:
+                    line_offsets = [i for i, c in enumerate(text) if c == "\n"]
+                line = bisect.bisect_left(line_offsets, m.start()) + 1
                 context = self._context(text, m.start(), secret)
                 service = refine_service(rule.service, context)
                 out.append(

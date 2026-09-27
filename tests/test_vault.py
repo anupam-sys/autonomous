@@ -56,3 +56,14 @@ def test_no_value_returns_none(db):
     fid = db._conn.execute(
         "SELECT id FROM findings WHERE target_id=?", (tid,)).fetchone()["id"]
     assert db.get_finding_secret(fid) is None
+
+
+def test_vault_custom_configured_path(tmp_path):
+    custom_dir = tmp_path / "custom_data"
+    custom_key = custom_dir / "secret.key"
+    crypto_vault.configure(custom_key)
+
+    blob = crypto_vault.encrypt("custom-secret")
+    assert custom_key.exists()
+    assert crypto_vault.decrypt(blob) == "custom-secret"
+    crypto_vault.configure(None)

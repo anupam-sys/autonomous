@@ -240,6 +240,62 @@ def register_commands(bot: commands.Bot) -> None:
             f"✅ Finding **#{finding_id}** marked as `{verdict.value}`" + (f" with note: *{notes}*" if notes else "")
         )
 
+    # ------------------ /investigate ------------------
+    @bot.tree.command(name="investigate", description="Run autonomous agent investigation & safe probe on a finding")
+    @app_commands.describe(finding_id="Numeric ID of the finding to investigate")
+    async def slash_investigate(interaction: discord.Interaction, finding_id: int):
+        if not bot.is_authorized(interaction.user.id):
+            await interaction.response.send_message("⛔ Unauthorized.", ephemeral=True)
+            return
+
+        await interaction.response.defer()
+        from ..agent import investigate_finding
+
+        loop = asyncio.get_running_loop()
+        res = await loop.run_in_executor(None, investigate_finding, ctx, finding_id)
+
+        status = res.get("status", "unknown").upper()
+        color = 0x2ECC71 if status == "VERIFIED_LIVE" else (0xE74C3C if status == "FALSE_POSITIVE_MOCK" else 0x3498DB)
+
+        embed = discord.Embed(
+            title=f"🤖 Agent Investigation #{finding_id}: {status}",
+            color=color,
+        )
+        embed.add_field(name="Verdict", value=f"`{status}`", inline=True)
+        embed.add_field(name="Blast Radius", value=res.get("blast_radius") or "None detected", inline=True)
+        embed.add_field(name="Executive Summary", value=res.get("summary") or "Investigation completed.", inline=False)
+
+        trace = res.get("tool_trace", [])
+        if trace:
+            tools_used = ", ".join(t.get("tool", "tool") for t in trace if isinstance(t, dict) and "tool" in t)
+            embed.add_field(name="Autonomous Tools Executed", value=f"`{tools_used or 'probes'}` ({len(trace)} turns)", inline=False)
+
+        patch = res.get("patch_diff")
+        if patch:
+            patch_display = patch[:900] + ("..." if len(patch) > 900 else "")
+            embed.add_field(name="Remediation Patch Diff", value=f"```diff\n{patch_display}\n```", inline=False)
+
+        await interaction.followup.send(embed=embed)
+
+    @bot.command(name="investigate")
+    async def cmd_investigate(c, finding_id: int):
+        if not bot.is_authorized(c.author.id):
+            return
+        from ..agent import investigate_finding
+
+        loop = asyncio.get_running_loop()
+        res = await loop.run_in_executor(None, investigate_finding, ctx, finding_id)
+        status = res.get("status", "unknown").upper()
+        color = 0x2ECC71 if status == "VERIFIED_LIVE" else (0xE74C3C if status == "FALSE_POSITIVE_MOCK" else 0x3498DB)
+        embed = discord.Embed(
+            title=f"🤖 Agent Investigation #{finding_id}: {status}",
+            color=color,
+        )
+        embed.add_field(name="Verdict", value=f"`{status}`", inline=True)
+        embed.add_field(name="Blast Radius", value=res.get("blast_radius") or "None detected", inline=True)
+        embed.add_field(name="Executive Summary", value=res.get("summary") or "Investigation completed.", inline=False)
+        await c.send(embed=embed)
+
     # ------------------ /prune ------------------
     @bot.tree.command(name="prune", description="Run intelligence filter to prune spam/bot targets from the queue")
     async def slash_prune(interaction: discord.Interaction):
@@ -480,6 +536,7 @@ def register_commands(bot: commands.Bot) -> None:
         )
         embed.add_field(name="/status", value="View daemon health, worker queues, bandwidth", inline=True)
         embed.add_field(name="/finding <id>", value="Retrieve decrypted secret & context for a finding", inline=True)
+        embed.add_field(name="/investigate <id>", value="Run autonomous agent investigation & safe probe", inline=True)
         embed.add_field(name="/ask <question>", value="Ask LLM questions about a finding", inline=True)
         embed.add_field(name="/ports", value="List indexed online Ollama & Kobold interfaces", inline=True)
         embed.add_field(name="/scan_ports", value="Scan and index online ports for open LLMs", inline=True)

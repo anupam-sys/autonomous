@@ -98,21 +98,10 @@ def _scan_single(ctx, target, scanner: Scanner, rules: list) -> tuple[int, int, 
                  f"[{f.severity.upper()}] {f.detector} ({f.service}) "
                  f"in {f.file_path}:{f.line} = {f.secret_preview}",
                  target.name, level="finding")
-                 
-            if ctx.cfg.notifications.discord.notify_on in ("any", "high_severity"):
-                from ..notify import notify_finding
-                notify_finding(ctx, {
-                    "id": f.id,
-                    "severity": f.severity,
-                    "detector": f.detector,
-                    "service": f.service,
-                    "target_name": target.name,
-                    "target_kind": target.kind.value,
-                    "file_path": f.file_path,
-                    "line": f.line,
-                    "secret_preview": f.secret_preview,
-                    "secret_full": f.secret_full,
-                }, "pending")
+
+            from ..notify import maybe_notify_raw_finding
+
+            maybe_notify_raw_finding(ctx, f, target)
     ctx.queue.complete(target.id)
     if new:
         logger.info("%s: %d NEW findings (%d files)", target.name, new, files)

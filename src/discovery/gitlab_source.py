@@ -24,7 +24,7 @@ class GitlabSource:
             "per_page": 50,
         }
         headers = {}
-        token = getattr(ctx.cfg, "gitlab_token", None)
+        token = getattr(ctx.cfg.discovery, "gitlab_token", "") or getattr(ctx.cfg, "gitlab_token", "") or os.environ.get("GITLAB_TOKEN", "")
         if token:
             headers["PRIVATE-TOKEN"] = token
         try:

@@ -55,31 +55,54 @@ def run_discovery(ctx) -> dict:
     intel_cfg = getattr(d, "intelligence", None)
     intel_enabled = getattr(intel_cfg, "enabled", True) if intel_cfg else True
 
+    workers = max(1, getattr(ctx.cfg.limits, "discovery_workers", 8))
     stats: dict[str, int] = {}
-    emit(ctx, "discovery", f"discovery pass started ({len(sources)} sources)")
-    for src in sources:
-        try:
-            emit(ctx, "discovery", f"searching source: {src.name} ...")
-            new = 0
-            filtered = 0
-            for t in src.discover(ctx):
-                if intel_enabled:
-                    ev = evaluate_target(t, cfg=intel_cfg)
-                    if not ev.keep:
-                        filtered += 1
-                        logger.debug("intelligence filtered %s: %s", t.name, ev.reason)
-                        continue
-                    t.priority = ev.score
-                if ctx.queue.enqueue(t):
-                    new += 1
-            stats[src.name] = new
-            logger.info("%-16s -> %d new targets (filtered %d noise)", src.name, new, filtered)
-            emit(ctx, "discovery", f"{src.name} -> {new} new targets ({filtered} noise filtered)")
-        except Exception:
-            logger.exception("discovery source %s failed", src.name)
-            emit(ctx, "discovery", f"source {src.name} FAILED", level="error")
-            stats[src.name] = -1
+    emit(ctx, "discovery", f"discovery pass started ({len(sources)} sources in parallel)")
+
+    if workers == 1 or len(sources) <= 1:
+        for src in sources:
+            name, new, filtered, success = _run_single_source(src, ctx, intel_enabled, intel_cfg)
+            stats[name] = new if success else -1
+    else:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        with ThreadPoolExecutor(max_workers=min(workers, len(sources))) as executor:
+            fut_map = {
+                executor.submit(_run_single_source, src, ctx, intel_enabled, intel_cfg): src
+                for src in sources
+            }
+            for fut in as_completed(fut_map):
+                name, new, filtered, success = fut.result()
+                stats[name] = new if success else -1
+
     total = sum(v for v in stats.values() if v > 0)
-    logger.info("discovery pass complete: %d new targets total", total)
+    logger.info("discovery pass complete: %d new targets total across %d sources", total, len(sources))
     emit(ctx, "discovery", f"pass complete: {total} new targets")
     return stats
+
+
+def _run_single_source(src, ctx, intel_enabled: bool, intel_cfg) -> tuple[str, int, int, bool]:
+    """Execute discovery for one source. Returns (source_name, new_count, filtered_count, success)."""
+    from .intelligence import evaluate_target
+
+    emit(ctx, "discovery", f"searching source: {src.name} ...")
+    new = 0
+    filtered = 0
+    try:
+        for t in src.discover(ctx):
+            if intel_enabled:
+                ev = evaluate_target(t, cfg=intel_cfg)
+                if not ev.keep:
+                    filtered += 1
+                    logger.debug("intelligence filtered %s: %s", t.name, ev.reason)
+                    continue
+                t.priority = ev.score
+            if ctx.queue.enqueue(t):
+                new += 1
+        logger.info("%-16s -> %d new targets (filtered %d noise)", src.name, new, filtered)
+        emit(ctx, "discovery", f"{src.name} -> {new} new targets ({filtered} noise filtered)")
+        return src.name, new, filtered, True
+    except Exception:
+        logger.exception("discovery source %s failed", src.name)
+        emit(ctx, "discovery", f"source {src.name} FAILED", level="error")
+        return src.name, 0, 0, False

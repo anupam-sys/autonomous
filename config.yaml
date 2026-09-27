@@ -13,7 +13,11 @@ paths:
 # --- resource knobs: defaults are for a SMALL VPS (2 vCPU/4GB).
 # Raise these when you move to a bigger box. ---
 limits:
-  workers: 8                    # concurrent acquire/decompile jobs
+  workers: 8                    # fallback general concurrency
+  acquire_workers: 16           # concurrent network clones & downloads
+  scan_workers: 8               # concurrent filesystem & regex scans
+  agent_workers: 4              # concurrent autonomous agent investigation threads
+  discovery_workers: 8          # concurrent discovery source runners
   jadx_concurrency: 4           # concurrent jadx processes (RAM-hungry)
   max_apk_mb: 300               # skip APKs larger than this
   max_repo_mb: 500              # skip repos larger than this
@@ -100,6 +104,15 @@ llm:
     enabled: false
     allow_auto_dorks: false     # false = suggestions wait for approval in DB
     interval_hours: 24
+
+# --- Autonomous Agentic Triage & Safe Identity Probing ---
+agent:
+  enabled: true                 # autonomous deep context investigation
+  active_probing: true          # safe non-destructive read-only identity verification
+  exclude_localhost: true       # strictly exclude localhost/loopback
+  max_turns: 4                  # maximum tool turns per investigation
+  auto_investigate_high: true   # auto-run agent on high & critical findings
+  min_confidence: 0.5           # minimum rule confidence for agent analysis
 
 # --- live transparency dashboard ---
 web:

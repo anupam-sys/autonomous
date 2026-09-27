@@ -1,6 +1,7 @@
 """Config overlay + web config API."""
 from __future__ import annotations
 
+from unittest.mock import patch
 import pytest
 import yaml
 
@@ -112,12 +113,13 @@ def test_config_post_secret_writeonly(web_client):
 
 def test_config_discord_bot_settings(web_client):
     client, overlay = web_client
-    r = client.post("/api/config", json={"updates": {
-        "notifications.discord.enabled": True,
-        "notifications.discord.bot_token": "discord-bot-secret-token",
-        "notifications.discord.channel_id": "123456789012345678",
-        "notifications.discord.create_threads": True,
-    }})
+    with patch("src.bot.start_discord_bot"):
+        r = client.post("/api/config", json={"updates": {
+            "notifications.discord.enabled": True,
+            "notifications.discord.bot_token": "discord-bot-secret-token",
+            "notifications.discord.channel_id": "123456789012345678",
+            "notifications.discord.create_threads": True,
+        }})
     assert r.status_code == 200
     text = overlay.read_text()
     assert "discord-bot-secret-token" in text
