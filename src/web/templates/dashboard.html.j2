@@ -549,6 +549,10 @@ const CFG_SECTIONS = [
     ['agent.max_turns', 'int', 'MAX TOOL TURNS PER FINDING'],
     ['agent.min_confidence', 'float', 'MIN CONFIDENCE FLOOR'],
     ['agent.findings_per_investigation', 'int', 'FINDINGS PER AGENT CONVERSATION (REQ SAVER)'],
+    ['agent.model', 'str', 'AGENT MODEL OVERRIDE (EMPTY=INHERIT)'],
+    ['agent.base_url', 'str', 'AGENT ENDPOINT OVERRIDE (EMPTY=INHERIT)'],
+    ['agent.api_key', 'secret', 'AGENT KEY OVERRIDE (EMPTY=INHERIT)'],
+    ['agent.timeout_seconds', 'int', 'AGENT TIMEOUT S (0=INHERIT)'],
   ]],
   ['NEURAL NETWORK — TRIAGE & AI DISCOVERY', [
     ['llm.enabled', 'bool', 'ENABLE LLM TRIAGE'],

@@ -40,6 +40,11 @@ class AgentConfig:
     auto_investigate_high: bool = True  # auto-run agent on high & critical findings
     min_confidence: float = 0.5         # minimum rule confidence for agent analysis
     findings_per_investigation: int = 1  # >1: one agent conversation covers N findings (fewer requests)
+    # --- optional separate LLM for agent investigations (empty/0 = inherit llm.*) ---
+    model: str = ""                     # e.g. a stronger model for tool-use reasoning
+    base_url: str = ""                  # different OpenAI-compatible endpoint for the agent
+    api_key: str = ""                   # separate key for the agent endpoint
+    timeout_seconds: int = 0            # 0 = inherit llm.timeout_seconds
 
 
 @dataclass
@@ -280,6 +285,12 @@ class Config:
                 self.agent.max_turns = int(env["AGENT_MAX_TURNS"])
             except ValueError:
                 pass
+        if env.get("AGENT_MODEL"):
+            self.agent.model = env["AGENT_MODEL"]
+        if env.get("AGENT_BASE_URL"):
+            self.agent.base_url = env["AGENT_BASE_URL"]
+        if env.get("AGENT_API_KEY"):
+            self.agent.api_key = env["AGENT_API_KEY"]
         if env.get("WEB_HOST"):
             self.web.host = env["WEB_HOST"]
         if env.get("WEB_PORT"):

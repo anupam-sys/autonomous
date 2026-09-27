@@ -118,6 +118,13 @@ agent:
   findings_per_investigation: 1 # >1: one agent conversation investigates N findings
                                 # (shared tool trace, per-finding verdicts) — big
                                 # request saver when you're limited by requests/day
+  # --- optional separate LLM just for agent investigations ---
+  # Leave empty to inherit the shared llm.* settings above. Set these to run
+  # triage on a cheap/fast model and the agent on a stronger tool-using one.
+  model: ""                     # e.g. "gpt-4o" | "claude-haiku-4-5" | "qwen2.5:32b"
+  base_url: ""                  # different OpenAI-compatible endpoint for the agent
+  api_key: ""                   # separate key (or AGENT_API_KEY env var)
+  timeout_seconds: 0            # 0 = inherit llm.timeout_seconds
 
 # --- live transparency dashboard ---
 web:

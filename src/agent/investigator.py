@@ -22,8 +22,8 @@ def run_agent_investigations(ctx: Any) -> dict[str, Any]:
                      "(agent.auto_investigate_high: false); manual triggers only")
         return {}
 
-    api_key = getattr(ctx.cfg.llm, "api_key", "")
-    base_url = getattr(ctx.cfg.llm, "base_url", "")
+    api_key = (getattr(ctx.cfg.agent, "api_key", "") or getattr(ctx.cfg.llm, "api_key", ""))
+    base_url = (getattr(ctx.cfg.agent, "base_url", "") or getattr(ctx.cfg.llm, "base_url", ""))
     if not api_key and "localhost" not in base_url and "127.0.0.1" not in base_url:
         logger.debug("Agent skipped: No LLM API key configured.")
         return {}

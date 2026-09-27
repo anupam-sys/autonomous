@@ -28,6 +28,7 @@ logger = get_logger("web")
 # paths whose values are write-only over the API
 SECRET_PATHS = {
     "llm.api_key",
+    "agent.api_key",
     "discovery.github_recent.token",
     "discovery.gitlab_token",
     "web.token",
@@ -47,6 +48,8 @@ EDITABLE: dict[str, str] = {
     "agent.enabled": "bool", "agent.active_probing": "bool", "agent.exclude_localhost": "bool",
     "agent.auto_investigate_high": "bool", "agent.max_turns": "int", "agent.min_confidence": "float",
     "agent.findings_per_investigation": "int",
+    "agent.model": "str", "agent.base_url": "str", "agent.api_key": "secret",
+    "agent.timeout_seconds": "int",
     "limits.workers": "int", "limits.acquire_workers": "int", "limits.scan_workers": "int",
     "limits.agent_workers": "int", "limits.discovery_workers": "int", "limits.jadx_concurrency": "int",
     "limits.max_apk_mb": "int", "limits.max_repo_mb": "int",

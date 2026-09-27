@@ -367,3 +367,111 @@ def test_run_agent_investigations_grouping(cfg, db):
         assert mock_single.call_count == 1
         assert stats["investigated"] == 3
         assert stats["verified_live"] == 3
+
+
+def test_agent_uses_separate_model_when_set(cfg, db):
+    """The investigation must call chat.completions with agent.model, not llm.model."""
+    from src.agent.runner import investigate_finding
+
+    target = Target(kind=TargetKind.REPO, source="test", locator="test/repo", name="test/repo")
+    target_id, _ = db.upsert_target(target)
+    fids = _insert_agent_findings(db, target_id, 1)
+
+    ctx = DummyContext(cfg, db)
+    ctx.cfg.llm.model = "triage-model"
+    ctx.cfg.agent.model = "agent-model"
+
+    with patch("src.agent.runner._get_openai_client") as mock_client_factory:
+        mock_client = MagicMock()
+        mock_client_factory.return_value = mock_client
+        msg_final = MagicMock()
+        msg_final.tool_calls = None
+        msg_final.content = json.dumps({
+            "status": "unverified", "blast_radius": "",
+            "summary": "s", "patch_diff": None,
+        })
+        mock_client.chat.completions.create.return_value = MagicMock(
+            choices=[MagicMock(message=msg_final)]
+        )
+
+        investigate_finding(ctx, fids[0])
+        assert mock_client.chat.completions.create.call_args.kwargs["model"] == "agent-model"
+
+        # override cleared -> falls back to the shared llm.model
+        ctx.cfg.agent.model = ""
+        investigate_finding(ctx, fids[0])
+        assert mock_client.chat.completions.create.call_args.kwargs["model"] == "triage-model"
+
+
+def test_agent_client_endpoint_overrides(cfg, db):
+    """_get_openai_client must build the client from agent.* overrides, else llm.*."""
+    from src.agent import runner
+
+    ctx = DummyContext(cfg, db)
+    ctx.cfg.llm.base_url = "https://shared.example/v1"
+    ctx.cfg.llm.api_key = "shared-key"
+    ctx.cfg.llm.timeout_seconds = 60
+    ctx.cfg.agent.base_url = "https://agent.example/v1"
+    ctx.cfg.agent.api_key = "agent-key"
+    ctx.cfg.agent.timeout_seconds = 12
+
+    with patch("openai.OpenAI") as mock_openai:
+        runner._get_openai_client(ctx)
+        kw = mock_openai.call_args.kwargs
+        assert kw["base_url"] == "https://agent.example/v1"
+        assert kw["api_key"] == "agent-key"
+        assert kw["timeout"] == 12
+
+    # overrides cleared -> shared llm settings inherited
+    ctx.cfg.agent.base_url = ""
+    ctx.cfg.agent.api_key = ""
+    ctx.cfg.agent.timeout_seconds = 0
+    with patch("openai.OpenAI") as mock_openai:
+        runner._get_openai_client(ctx)
+        kw = mock_openai.call_args.kwargs
+        assert kw["base_url"] == "https://shared.example/v1"
+        assert kw["api_key"] == "shared-key"
+        assert kw["timeout"] == 60
+
+
+def test_investigator_gate_accepts_agent_only_key(cfg, db):
+    """A lone agent.api_key (empty llm.api_key, non-localhost llm.base_url) must not skip the stage."""
+    target = Target(kind=TargetKind.REPO, source="test", locator="test/repo", name="test/repo")
+    target_id, _ = db.upsert_target(target)
+    _insert_agent_findings(db, target_id, 2)
+
+    ctx = DummyContext(cfg, db)
+    ctx.cfg.agent.enabled = True
+    ctx.cfg.llm.api_key = ""
+    ctx.cfg.llm.base_url = "https://api.example.com/v1"
+
+    with patch("src.agent.investigator.investigate_finding") as mock_investigate:
+        mock_investigate.side_effect = lambda c, fid: {
+            "finding_id": fid, "status": "unverified",
+            "blast_radius": "", "summary": "",
+        }
+
+        # no agent key -> stage skips entirely
+        stats = run_agent_investigations(ctx)
+        assert stats == {}
+        assert mock_investigate.call_count == 0
+
+        # agent-only key -> stage runs
+        ctx.cfg.agent.api_key = "agent-only-key"
+        stats = run_agent_investigations(ctx)
+        assert stats["investigated"] == 2
+        assert mock_investigate.call_count == 2
+
+
+def test_agent_llm_env_overrides(monkeypatch, tmp_path):
+    """AGENT_MODEL / AGENT_BASE_URL / AGENT_API_KEY env vars must land in config."""
+    from src.config import Config
+
+    monkeypatch.setenv("AGENT_MODEL", "env-agent-model")
+    monkeypatch.setenv("AGENT_BASE_URL", "https://env-agent/v1")
+    monkeypatch.setenv("AGENT_API_KEY", "env-agent-key")
+
+    c = Config.load("config.yaml", overlay=str(tmp_path / "missing.yaml"))
+    assert c.agent.model == "env-agent-model"
+    assert c.agent.base_url == "https://env-agent/v1"
+    assert c.agent.api_key == "env-agent-key"

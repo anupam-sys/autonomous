@@ -58,12 +58,26 @@ When you have finished ALL findings, provide ONE final JSON response covering ev
 """
 
 
+def _agent_llm_settings(ctx: Any) -> tuple[str, str, str, int]:
+    """Resolve the agent's effective LLM settings.
+
+    agent.* overrides win; empty/0 falls back to the shared llm.* settings.
+    Returns (model, base_url, api_key, timeout_seconds).
+    """
+    llm = ctx.cfg.llm
+    ag = getattr(ctx.cfg, "agent", None)
+    model = (getattr(ag, "model", "") or "") or getattr(llm, "model", "gpt-4o-mini")
+    base_url = ((getattr(ag, "base_url", "") or "")
+                or getattr(llm, "base_url", "https://api.openai.com/v1"))
+    api_key = (getattr(ag, "api_key", "") or "") or getattr(llm, "api_key", "")
+    timeout = int(getattr(ag, "timeout_seconds", 0) or 0) or getattr(llm, "timeout_seconds", 45)
+    return model, base_url, api_key, timeout
+
+
 def _get_openai_client(ctx: Any):
     from openai import OpenAI
 
-    base_url = getattr(ctx.cfg.llm, "base_url", "https://api.openai.com/v1")
-    api_key = getattr(ctx.cfg.llm, "api_key", "")
-    timeout = getattr(ctx.cfg.llm, "timeout_seconds", 45)
+    _, base_url, api_key, timeout = _agent_llm_settings(ctx)
 
     return OpenAI(
         base_url=base_url,
@@ -144,7 +158,7 @@ def investigate_findings(ctx: Any, finding_ids: list[int]) -> list[dict[str, Any
     ]
 
     max_turns = getattr(ctx.cfg.agent, "max_turns", 4)
-    model = getattr(ctx.cfg.llm, "model", "gpt-4o-mini")
+    model, _, _, _ = _agent_llm_settings(ctx)
 
     client = _get_openai_client(ctx)
     verdicts: dict[int, dict[str, Any]] = {}
