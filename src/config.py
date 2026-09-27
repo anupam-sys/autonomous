@@ -279,6 +279,17 @@ class Config:
                 self.agent.max_turns = int(env["AGENT_MAX_TURNS"])
             except ValueError:
                 pass
+        if env.get("WEB_HOST"):
+            self.web.host = env["WEB_HOST"]
+        if env.get("WEB_PORT"):
+            try:
+                self.web.port = int(env["WEB_PORT"])
+            except ValueError:
+                pass
+        if env.get("WEB_TOKEN"):
+            self.web.token = env["WEB_TOKEN"]
+        if env.get("WEB_ENABLED"):
+            self.web.enabled = env["WEB_ENABLED"].lower() in ("1", "true", "yes")
 
     def ensure_dirs(self) -> None:
         Path(self.paths.data_dir).mkdir(parents=True, exist_ok=True)

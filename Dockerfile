@@ -28,7 +28,5 @@ RUN mkdir -p /app/data /app/reports /app/logs /app/tools && \
 ENV PYTHONUNBUFFERED=1
 VOLUME ["/app/data", "/app/reports", "/app/logs"]
 
-USER appuser
-
 # continuous daemon; use `docker compose run --rm pipeline run --once` for a single pass
 CMD ["python", "-m", "src.main", "run"]
