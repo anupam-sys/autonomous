@@ -39,6 +39,7 @@ class AgentConfig:
     max_turns: int = 4                  # maximum tool turns per investigation
     auto_investigate_high: bool = True  # auto-run agent on high & critical findings
     min_confidence: float = 0.5         # minimum rule confidence for agent analysis
+    findings_per_investigation: int = 1  # >1: one agent conversation covers N findings (fewer requests)
 
 
 @dataclass
@@ -155,6 +156,7 @@ class LlmConfig:
     triage_confidence_floor: float = 0.5
     max_findings_per_run: int = 500
     batch_size: int = 25
+    request_token_budget: int = 0       # >0: pack each triage request to ~N tokens (overrides batch_size counting)
     ai_discovery: AiDiscoveryConfig = field(default_factory=AiDiscoveryConfig)
 
 

@@ -15,6 +15,15 @@ from .probes import dispatch_probe
 
 logger = get_logger("agent.tools")
 
+# Optional arg injected into every tool schema: in multi-finding investigations
+# the agent passes the finding each tool call applies to.
+_FINDING_ID_PROP = {
+    "finding_id": {
+        "type": "integer",
+        "description": "ID of the finding this call applies to (required in multi-finding investigations)",
+    },
+}
+
 AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
@@ -132,16 +141,35 @@ AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
 ]
 
 
+for _schema in AGENT_TOOL_SCHEMAS:
+    _schema["function"]["parameters"]["properties"].update(_FINDING_ID_PROP)
+
+
 class AgentToolExecutor:
     """Dispatches tool calls with access to workspace artifacts and database."""
 
-    def __init__(self, ctx: Any, finding: dict[str, Any], artifact_path: str | None = None):
+    def __init__(self, ctx: Any, finding: dict[str, Any], artifact_path: str | None = None,
+                 findings: dict[int, tuple[dict[str, Any], str | None]] | None = None):
         self.ctx = ctx
         self.finding = finding
         self.artifact_path = Path(artifact_path) if artifact_path else None
+        # multi-finding investigations: finding_id -> (finding, artifact_path)
+        self._findings = findings or {}
 
     def execute(self, tool_name: str, arguments: dict[str, Any]) -> str:
         """Route tool call to local implementation."""
+        # In multi-finding mode, rebind context to the addressed finding
+        prev = (self.finding, self.artifact_path)
+        fid = arguments.get("finding_id")
+        if fid is not None:
+            try:
+                target = self._findings.get(int(fid))
+            except (TypeError, ValueError):
+                target = None
+            if target is not None:
+                f, p = target
+                self.finding = f
+                self.artifact_path = Path(p) if p else None
         try:
             if tool_name == "read_code_context":
                 return self._read_code_context(
@@ -173,6 +201,8 @@ class AgentToolExecutor:
         except Exception as exc:
             logger.exception("Agent tool '%s' error: %s", tool_name, exc)
             return json.dumps({"error": f"Tool execution failed: {exc}"})
+        finally:
+            self.finding, self.artifact_path = prev
 
     def _read_code_context(self, file_path: str, line: int, radius: int = 15) -> str:
         if not self.artifact_path or not self.artifact_path.exists():

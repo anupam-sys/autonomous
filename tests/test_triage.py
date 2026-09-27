@@ -132,3 +132,73 @@ def test_run_triage_batches_requests(cfg, db):
         assert stats["triaged"] == 12
         assert stats["true_positive"] == 12
         assert mock_client.chat.completions.create.call_count == 3
+
+
+def test_run_triage_token_budget_packing(cfg, db):
+    """Token-centered batching: requests are filled to a token budget, not an item count."""
+    from src.models import Target, Finding, TargetKind, SecretType, TriageStatus
+    from src.triage.triage import _format_item, _estimate_tokens, SYSTEM_PROMPT
+    from unittest.mock import patch
+    import json
+    import re
+
+    cfg.llm.enabled = True
+    cfg.llm.batch_size = 50  # high item cap so the token budget is the real limiter
+
+    target = Target(kind=TargetKind.REPO, source="test", locator="test/repo", name="test/repo")
+    target_id, _ = db.upsert_target(target)
+
+    for i in range(12):
+        finding = Finding(
+            target_id=target_id,
+            detector="openai-key",
+            service="openai",
+            secret_type=SecretType.API_KEY,
+            file_path=f"file_{i}.py",
+            line=10,
+            secret_preview=f"sk-test-{i}",
+            secret_hash=f"hash_tok_{i}",
+            secret_full=f"sk-full-{i}",
+            context="x" * 400,  # uniform sizes -> deterministic packing
+            severity="high",
+            confidence=0.8,
+            triage_status=TriageStatus.PENDING,
+        )
+        db.insert_finding(finding)
+
+    class DummyContext:
+        def __init__(self, cfg, db):
+            self.cfg = cfg
+            self.db = db
+
+    ctx = DummyContext(cfg, db)
+
+    # budget that fits exactly 4 findings per request (+ system prompt overhead)
+    rows = db.untriaged_findings(0.5, 500)
+    est_each = _estimate_tokens(_format_item(rows[0]))
+    overhead = _estimate_tokens(SYSTEM_PROMPT) + 16
+    cfg.llm.request_token_budget = overhead + est_each * 4 + 1
+
+    batch_sizes = []
+    with patch("src.triage.triage._client") as mock_client_factory:
+        mock_client = MagicMock()
+        mock_client_factory.return_value = mock_client
+
+        def mock_create(*args, **kwargs):
+            messages = kwargs.get("messages", [])
+            user_msg = messages[1]["content"] if len(messages) > 1 else ""
+            ids = [int(m) for m in re.findall(r"FINDING #(\d+)", user_msg)]
+            batch_sizes.append(len(ids))
+            verdicts = [{"id": fid, "verdict": "true_positive", "confidence": 0.9, "reason": "verified"} for fid in ids]
+            mock_resp = MagicMock()
+            mock_resp.choices = [MagicMock(message=MagicMock(content=json.dumps({"verdicts": verdicts})))]
+            return mock_resp
+
+        mock_client.chat.completions.create.side_effect = mock_create
+
+        stats = run_triage(ctx)
+
+        # 12 findings, 4 per token-budgeted request -> exactly 3 requests of 4
+        assert stats["requests"] == 3
+        assert batch_sizes == [4, 4, 4]
+        assert stats["triaged"] == 12

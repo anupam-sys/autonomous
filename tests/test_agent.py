@@ -252,3 +252,118 @@ def test_run_agent_investigations_pipeline_stage(cfg, db):
         assert stats["investigated"] == 3
         assert stats["verified_live"] == 3
         assert mock_investigate.call_count == 3
+
+
+def _insert_agent_findings(db, target_id, n=3):
+    for i in range(n):
+        f = Finding(
+            target_id=target_id,
+            detector="github-token",
+            service="github",
+            secret_type=SecretType.TOKEN,
+            file_path=f"src/mod_{i}.py",
+            line=20,
+            secret_preview=f"ghp_preview_{i}",
+            secret_hash=f"hash_multi_{i}",
+            secret_full=f"ghp_fullTokenValue_{i}",
+            context="token = 'ghp_...'",
+            severity="high",
+            confidence=0.85,
+            triage_status=TriageStatus.PENDING,
+        )
+        db.insert_finding(f)
+    rows = [r for r in db.findings_for_report() if r["detector"] == "github-token"]
+    rows.sort(key=lambda r: r["file_path"])
+    return [r["id"] for r in rows]
+
+
+def test_investigate_findings_multi_one_conversation(cfg, db):
+    """3 findings investigated in ONE conversation: 2 requests total, not 2x3."""
+    from src.agent.runner import investigate_findings
+
+    target = Target(kind=TargetKind.REPO, source="test", locator="test/repo", name="test/repo")
+    target_id, _ = db.upsert_target(target)
+    fids = _insert_agent_findings(db, target_id, 3)
+
+    ctx = DummyContext(cfg, db)
+
+    with patch("src.agent.runner._get_openai_client") as mock_client_factory:
+        mock_client = MagicMock()
+        mock_client_factory.return_value = mock_client
+
+        # turn 1: one tool call explicitly addressing the 2nd finding
+        func_mock = MagicMock()
+        func_mock.name = "inspect_test_environment"
+        func_mock.arguments = json.dumps({"file_path": "src/mod_1.py", "finding_id": fids[1]})
+        msg_tool_call = MagicMock()
+        msg_tool_call.tool_calls = [MagicMock(id="call_1", function=func_mock)]
+        msg_tool_call.content = None
+
+        # turn 2: final verdicts array covering all 3 findings
+        msg_final = MagicMock()
+        msg_final.tool_calls = None
+        msg_final.content = json.dumps({"verdicts": [
+            {"finding_id": fids[0], "status": "verified_live",
+             "blast_radius": "Full GitHub Admin", "summary": "live token", "patch_diff": None},
+            {"finding_id": fids[1], "status": "false_positive_mock",
+             "blast_radius": "", "summary": "test fixture", "patch_diff": None},
+            {"finding_id": fids[2], "status": "unverified",
+             "blast_radius": "", "summary": "inconclusive", "patch_diff": None},
+        ]})
+
+        resp1 = MagicMock(choices=[MagicMock(message=msg_tool_call)])
+        resp2 = MagicMock(choices=[MagicMock(message=msg_final)])
+        mock_client.chat.completions.create.side_effect = [resp1, resp2]
+
+        results = investigate_findings(ctx, fids)
+
+        assert len(results) == 3
+        # ONE conversation for 3 findings: 2 requests total, not 2 per finding
+        assert mock_client.chat.completions.create.call_count == 2
+
+        by_id = {r["finding_id"]: r for r in results}
+        assert by_id[fids[0]]["status"] == "verified_live"
+        assert by_id[fids[1]]["status"] == "false_positive_mock"
+        assert by_id[fids[2]]["status"] == "unverified"
+
+        # every finding got its own investigation row (investigation tab intact)
+        for fid in fids:
+            assert db.get_investigation(fid) is not None
+
+        # per-finding triage updates applied
+        assert db.get_finding(fids[0])["triage_status"] == "true_positive"
+        assert db.get_finding(fids[1])["triage_status"] == "false_positive"
+
+
+def test_run_agent_investigations_grouping(cfg, db):
+    """findings_per_investigation=2 groups candidates into shared conversations."""
+    target = Target(kind=TargetKind.REPO, source="test", locator="test/repo", name="test/repo")
+    target_id, _ = db.upsert_target(target)
+    _insert_agent_findings(db, target_id, 3)
+
+    ctx = DummyContext(cfg, db)
+    ctx.cfg.agent.enabled = True
+    ctx.cfg.llm.api_key = "test-key"
+    ctx.cfg.limits.agent_workers = 1
+    ctx.cfg.agent.findings_per_investigation = 2
+
+    with patch("src.agent.investigator.investigate_findings") as mock_multi, \
+         patch("src.agent.investigator.investigate_finding") as mock_single:
+        mock_multi.side_effect = lambda c, ids: [
+            {"finding_id": i, "status": "verified_live",
+             "blast_radius": "Full GitHub Admin", "summary": "Verified live token"}
+            for i in ids
+        ]
+        mock_single.side_effect = lambda c, fid: {
+            "finding_id": fid, "status": "verified_live",
+            "blast_radius": "Full GitHub Admin", "summary": "Verified live token",
+        }
+
+        stats = run_agent_investigations(ctx)
+
+        # 3 findings with groups of 2 -> 1 grouped call (2 findings) + 1 single call
+        assert mock_multi.call_count == 1
+        assert len(mock_multi.call_args[0][1]) == 2
+        assert mock_single.call_count == 1
+        assert stats["investigated"] == 3
+        assert stats["verified_live"] == 3

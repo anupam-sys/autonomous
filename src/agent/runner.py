@@ -28,6 +28,35 @@ When you have finished your investigation or reached a confident verdict, provid
 ```
 """
 
+SYSTEM_PROMPT_MULTI = """You are the FAS Autonomous Security Agent, an elite DevSecOps researcher investigating potential credential exposures found in public source code and APKs.
+
+You are investigating {count} findings in THIS ONE conversation:
+{briefs}
+
+For EACH finding:
+1. Explore its codebase context using `read_code_context` or `inspect_test_environment`.
+2. Check if the credential is an obvious mock, dummy, or test fixture.
+3. If it looks like a real credential, safely verify it using `validate_credential_safe` (read-only identity probe).
+4. If verified or high-risk, generate a remediation patch with `draft_remediation`.
+
+IMPORTANT: pass `finding_id` in EVERY tool call so the correct codebase and secret is examined.
+
+When you have finished ALL findings, provide ONE final JSON response covering every finding id listed above:
+```json
+{{
+  "verdicts": [
+    {{
+      "finding_id": <int>,
+      "status": "verified_live|false_positive_mock|revoked|unverified",
+      "blast_radius": "<concise description of permissions / access scope / account>",
+      "summary": "<clear 2-3 sentence executive explanation of your findings>",
+      "patch_diff": "<unified git diff patch if applicable, or null>"
+    }}
+  ]
+}}
+```
+"""
+
 
 def _get_openai_client(ctx: Any):
     from openai import OpenAI
@@ -46,50 +75,79 @@ def _get_openai_client(ctx: Any):
 
 def investigate_finding(ctx: Any, finding_id: int) -> dict[str, Any]:
     """Run an autonomous agent investigation loop for a single finding."""
+    return investigate_findings(ctx, [finding_id])[0]
+
+
+def investigate_findings(ctx: Any, finding_ids: list[int]) -> list[dict[str, Any]]:
+    """Run ONE agent conversation covering one or more findings.
+
+    Grouping several findings into a single conversation drastically reduces
+    API request count (one ReAct loop per group instead of per finding) while
+    still producing an individual verdict + investigation row per finding.
+    """
     if not hasattr(ctx, "db"):
-        return {"error": "No database context"}
+        return [{"finding_id": fid, "status": "error", "error": "No database context"}
+                for fid in finding_ids]
 
-    row = ctx.db.get_finding(finding_id)
-    if not row:
-        return {"error": f"Finding #{finding_id} not found"}
+    findings: dict[int, dict[str, Any]] = {}
+    artifacts: dict[int, str | None] = {}
+    results: dict[int, dict[str, Any]] = {}
+    for fid in finding_ids:
+        row = ctx.db.get_finding(fid)
+        if not row:
+            results[fid] = {"finding_id": fid, "status": "error",
+                            "error": f"Finding #{fid} not found"}
+            continue
+        f = dict(row)
+        findings[fid] = f
+        artifacts[fid] = ctx.db.latest_artifact_path(f["target_id"])
+    if not findings:
+        return [results[fid] for fid in finding_ids]
 
-    finding = dict(row)
-    artifact_path = ctx.db.latest_artifact_path(finding["target_id"])
+    primary_id = next(iter(findings))
+    multi = len(findings) > 1
 
-    executor = AgentToolExecutor(ctx, finding, artifact_path)
+    executor = AgentToolExecutor(
+        ctx, findings[primary_id], artifacts[primary_id],
+        findings={fid: (f, artifacts[fid]) for fid, f in findings.items()},
+    )
     tool_trace: list[dict[str, Any]] = []
 
-    prompt = SYSTEM_PROMPT.format(
-        finding_id=finding_id,
-        detector=finding.get("detector", "unknown"),
-        service=finding.get("service", "unknown"),
-    )
+    if multi:
+        briefs = "\n".join(
+            f"  • Finding #{fid} ({f.get('detector', 'unknown')} in {f.get('service', 'unknown')})"
+            for fid, f in findings.items()
+        )
+        prompt = SYSTEM_PROMPT_MULTI.format(count=len(findings), briefs=briefs)
+    else:
+        prompt = SYSTEM_PROMPT.format(
+            finding_id=primary_id,
+            detector=findings[primary_id].get("detector", "unknown"),
+            service=findings[primary_id].get("service", "unknown"),
+        )
 
-    initial_user_message = (
-        f"Investigate Finding #{finding_id}:\n"
-        f"• Detector: {finding.get('detector')}\n"
-        f"• Service: {finding.get('service')}\n"
-        f"• File: {finding.get('file_path')}:{finding.get('line')}\n"
-        f"• Severity: {finding.get('severity')}\n"
-        f"• Secret Preview: {finding.get('secret_preview')}\n"
-        f"• Code Context:\n```\n{finding.get('context', '')[:800]}\n```"
-    )
+    blocks = []
+    for fid, f in findings.items():
+        blocks.append(
+            f"Investigate Finding #{fid}:\n"
+            f"• Detector: {f.get('detector')}\n"
+            f"• Service: {f.get('service')}\n"
+            f"• File: {f.get('file_path')}:{f.get('line')}\n"
+            f"• Severity: {f.get('severity')}\n"
+            f"• Secret Preview: {f.get('secret_preview')}\n"
+            f"• Code Context:\n```\n{f.get('context', '')[:800]}\n```"
+        )
 
     messages = [
         {"role": "system", "content": prompt},
-        {"role": "user", "content": initial_user_message},
+        {"role": "user", "content": "\n\n".join(blocks)},
     ]
 
     max_turns = getattr(ctx.cfg.agent, "max_turns", 4)
     model = getattr(ctx.cfg.llm, "model", "gpt-4o-mini")
 
     client = _get_openai_client(ctx)
-    final_verdict = {
-        "status": "unverified",
-        "blast_radius": "",
-        "summary": "Agent reached turn limit without a conclusive verdict.",
-        "patch_diff": None,
-    }
+    verdicts: dict[int, dict[str, Any]] = {}
 
     for turn in range(max_turns):
         try:
@@ -131,52 +189,88 @@ def investigate_finding(ctx: Any, finding_id: int) -> dict[str, Any]:
             else:
                 # Text response - parse final verdict JSON
                 content = msg.content or ""
-                parsed = _extract_verdict_json(content)
+                parsed = _extract_verdicts_json(content)
                 if parsed:
-                    final_verdict.update(parsed)
+                    for fid, verdict in parsed.items():
+                        verdicts[fid if fid else primary_id] = verdict
                     break
         except Exception as exc:
-            logger.warning("Agent investigation loop error on finding #%d: %s", finding_id, exc)
+            logger.warning("Agent investigation loop error on finding(s) %s: %s",
+                           list(findings), exc)
             tool_trace.append({"error": str(exc)})
             break
 
-    status = final_verdict.get("status", "unverified")
-    blast_radius = final_verdict.get("blast_radius", "")
-    summary = final_verdict.get("summary", "")
-    patch_diff = final_verdict.get("patch_diff")
+    for fid, f in findings.items():
+        final_verdict = {
+            "status": "unverified",
+            "blast_radius": "",
+            "summary": "Agent reached turn limit without a conclusive verdict.",
+            "patch_diff": None,
+        }
+        if fid in verdicts:
+            final_verdict.update(verdicts[fid])
 
-    ctx.db.upsert_investigation(
-        finding_id=finding_id,
-        status=status,
-        blast_radius=blast_radius,
-        summary=summary,
-        patch_diff=patch_diff,
-        tool_trace=tool_trace,
-    )
+        status = final_verdict.get("status", "unverified")
+        blast_radius = final_verdict.get("blast_radius", "")
+        summary = final_verdict.get("summary", "")
+        patch_diff = final_verdict.get("patch_diff")
 
-    if status == "verified_live":
-        ctx.db.set_finding_triage(finding_id, "true_positive", notes=f"[Agent Verified] {summary[:200]}")
-    elif status == "false_positive_mock":
-        ctx.db.set_finding_triage(finding_id, "false_positive", notes=f"[Agent Mock] {summary[:200]}")
+        ctx.db.upsert_investigation(
+            finding_id=fid,
+            status=status,
+            blast_radius=blast_radius,
+            summary=summary,
+            patch_diff=patch_diff,
+            tool_trace=tool_trace,
+        )
 
-    return {
-        "finding_id": finding_id,
-        "status": status,
-        "blast_radius": blast_radius,
-        "summary": summary,
-        "patch_diff": patch_diff,
-        "tool_trace": tool_trace,
-    }
+        if status == "verified_live":
+            ctx.db.set_finding_triage(fid, "true_positive", notes=f"[Agent Verified] {summary[:200]}")
+        elif status == "false_positive_mock":
+            ctx.db.set_finding_triage(fid, "false_positive", notes=f"[Agent Mock] {summary[:200]}")
+
+        results[fid] = {
+            "finding_id": fid,
+            "status": status,
+            "blast_radius": blast_radius,
+            "summary": summary,
+            "patch_diff": patch_diff,
+            "tool_trace": tool_trace,
+        }
+
+    return [results[fid] for fid in finding_ids]
 
 
-def _extract_verdict_json(text: str) -> dict[str, Any] | None:
-    match = re.search(r"\{.*\}", text, re.DOTALL)
+def _extract_verdicts_json(text: str) -> dict[int, dict[str, Any]] | None:
+    """Tolerant extraction of verdict JSON keyed by finding id.
+
+    Accepts a bare object {"status": ...} (mapped to key 0 = primary finding),
+    a bare array [{...}, ...], or an object wrapper {"verdicts": [...]}.
+    """
+    match = re.search(r"(\{.*\}|\[.*\])", text, re.DOTALL)
     if not match:
         return None
     try:
         data = json.loads(match.group(0))
-        if "status" in data:
-            return data
     except Exception:
-        pass
-    return None
+        return None
+
+    items: list[Any] = []
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        if isinstance(data.get("verdicts"), list):
+            items = data["verdicts"]
+        elif "status" in data:
+            items = [data]
+
+    out: dict[int, dict[str, Any]] = {}
+    for item in items:
+        if not isinstance(item, dict) or "status" not in item:
+            continue
+        try:
+            fid = int(item.get("finding_id", item.get("id", 0)) or 0)
+        except (TypeError, ValueError):
+            fid = 0
+        out[fid] = item
+    return out or None

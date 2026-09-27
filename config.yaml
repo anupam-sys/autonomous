@@ -99,6 +99,9 @@ llm:
   triage_confidence_floor: 0.5  # only LLM-triage findings at/above this confidence
   max_findings_per_run: 500     # LLM cost cap per pipeline pass
   batch_size: 25                # findings triaged per request (saves API calls)
+  request_token_budget: 0       # >0 = token-centered batching: fill each triage
+                                # request to ~N est. tokens instead of counting items
+                                # (batch_size still applies as a hard item cap)
   ai_discovery:
     enabled: false
     allow_auto_dorks: false     # false = suggestions wait for approval in DB
@@ -112,6 +115,9 @@ agent:
   max_turns: 4                  # maximum tool turns per investigation
   auto_investigate_high: true   # auto-run agent on high & critical findings
   min_confidence: 0.5           # minimum rule confidence for agent analysis
+  findings_per_investigation: 1 # >1: one agent conversation investigates N findings
+                                # (shared tool trace, per-finding verdicts) — big
+                                # request saver when you're limited by requests/day
 
 # --- live transparency dashboard ---
 web:

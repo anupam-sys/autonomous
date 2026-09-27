@@ -156,22 +156,57 @@ def parse_batch_verdicts(text: str) -> dict[int, Verdict]:
     return results
 
 
+def _format_item(row) -> str:
+    """One finding's block inside a batch triage prompt."""
+    return (
+        f"=== FINDING #{row['id']} ===\n"
+        f"Detector: {row['detector']}\n"
+        f"Classified service: {row['service']}\n"
+        f"Secret type: {row['secret_type']}\n"
+        f"File: {row['file_path']} (line {row['line']})\n"
+        f"Rule severity: {row['severity']}, rule confidence: {row['confidence']}\n"
+        f"Masked preview: {row['secret_preview']}\n"
+        f"Context (secrets masked):\n{row['context'][:1200]}"
+    )
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough prompt-token estimate (~4 chars/token) for batch packing."""
+    return max(1, len(text) // 4)
+
+
+def _pack_batches(rows: list, batch_size: int, token_budget: int) -> list[list]:
+    """Split rows into request batches.
+
+    token_budget > 0 enables token-centered packing: each request is filled
+    until the estimated prompt size reaches the budget (batch_size remains a
+    hard item cap). Otherwise plain fixed-count chunking.
+    """
+    if token_budget <= 0:
+        return [rows[i:i + batch_size] for i in range(0, len(rows), batch_size)]
+
+    overhead = _estimate_tokens(SYSTEM_PROMPT) + 16  # system prompt + wrapper text
+    batches: list[list] = []
+    current: list = []
+    current_tokens = overhead
+    for row in rows:
+        est = _estimate_tokens(_format_item(row))
+        if current and (len(current) >= batch_size
+                        or current_tokens + est > token_budget):
+            batches.append(current)
+            current, current_tokens = [], overhead
+        current.append(row)
+        current_tokens += est
+    if current:
+        batches.append(current)
+    return batches
+
+
 def triage_batch(client, ctx, batch: list) -> dict[int, Verdict]:
     """Evaluate a batch of findings in a single LLM request."""
     if not batch:
         return {}
-    items = []
-    for row in batch:
-        items.append(
-            f"=== FINDING #{row['id']} ===\n"
-            f"Detector: {row['detector']}\n"
-            f"Classified service: {row['service']}\n"
-            f"Secret type: {row['secret_type']}\n"
-            f"File: {row['file_path']} (line {row['line']})\n"
-            f"Rule severity: {row['severity']}, rule confidence: {row['confidence']}\n"
-            f"Masked preview: {row['secret_preview']}\n"
-            f"Context (secrets masked):\n{row['context'][:1200]}"
-        )
+    items = [_format_item(row) for row in batch]
     user_prompt = "Triage the following findings by ID:\n\n" + "\n\n".join(items)
 
     try:
@@ -235,13 +270,13 @@ def run_triage(ctx) -> dict:
                 "placeholder": 0, "errors": 0}
 
     batch_size = max(1, getattr(ctx.cfg.llm, "batch_size", 15))
+    token_budget = max(0, getattr(ctx.cfg.llm, "request_token_budget", 0))
     stats = {"triaged": 0, "true_positive": 0, "false_positive": 0,
              "placeholder": 0, "errors": 0, "requests": 0}
 
     from ..activity import emit
 
-    for i in range(0, len(rows), batch_size):
-        batch = rows[i:i + batch_size]
+    for batch in _pack_batches(rows, batch_size, token_budget):
         f_ids = [r["id"] for r in batch]
         emit(ctx, "triage",
              f"LLM evaluating batch of {len(batch)} findings in 1 request (#{f_ids[0]}..#{f_ids[-1]}) ...")

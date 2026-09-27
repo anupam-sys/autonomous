@@ -548,6 +548,7 @@ const CFG_SECTIONS = [
     ['agent.auto_investigate_high', 'bool', 'AUTO-INVESTIGATE HIGH/CRITICAL FINDINGS'],
     ['agent.max_turns', 'int', 'MAX TOOL TURNS PER FINDING'],
     ['agent.min_confidence', 'float', 'MIN CONFIDENCE FLOOR'],
+    ['agent.findings_per_investigation', 'int', 'FINDINGS PER AGENT CONVERSATION (REQ SAVER)'],
   ]],
   ['NEURAL NETWORK — TRIAGE & AI DISCOVERY', [
     ['llm.enabled', 'bool', 'ENABLE LLM TRIAGE'],
@@ -558,6 +559,7 @@ const CFG_SECTIONS = [
     ['llm.triage_confidence_floor', 'float', 'CONFIDENCE THRESHOLD'],
     ['llm.max_findings_per_run', 'int', 'MAX LLM THREATS/CYCLE'],
     ['llm.batch_size', 'int', 'TRIAGE BATCH SIZE (ITEMS/REQUEST)'],
+    ['llm.request_token_budget', 'int', 'TRIAGE TOKEN BUDGET/REQUEST (0=ITEM COUNT)'],
     ['llm.ai_discovery.enabled', 'bool', 'AI DISCOVERY ACTIVE'],
     ['llm.ai_discovery.allow_auto_dorks', 'bool', 'AUTO-DEPLOY AI DORKS'],
     ['llm.ai_discovery.interval_hours', 'int', 'DISCOVERY INTERVAL (H)'],
